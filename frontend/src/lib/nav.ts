@@ -2,7 +2,7 @@
 // title and the "g x" shortcuts — one list, so a renamed view is renamed everywhere.
 import {
   Archive, BellRing, Bot, ChartColumn, Cog, FolderKanban, House, Inbox, MessageSquareText, Factory, Plug,
-  Radar, ScrollText, Settings, ShieldCheck, Users, Workflow, Eye,
+  Radar, ScrollText, Settings, ShieldCheck, Users, Workflow, Eye, BookOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { paths, SETTINGS_TABS } from './router';
@@ -33,6 +33,7 @@ export const NAV_ITEMS: NavItem[] = [
   { path: paths.operations(), label: 'Operations', icon: Plug, section: 'studio', keywords: 'mcp tools bindings' },
   { path: paths.prompts(), label: 'Prompts', icon: MessageSquareText, section: 'studio', keywords: 'llm system prompts library' },
   { path: paths.rules(), label: 'Compliance Rules', icon: ShieldCheck, section: 'studio', keywords: 'quality gate security rules' },
+  { path: paths.guide(), label: 'User Guide', icon: BookOpen, section: 'bottom', shortcut: 'u', keywords: 'help documentation how to manual faq tutorial' },
   { path: paths.settings(), label: 'Settings', icon: Settings, section: 'bottom', shortcut: 's', keywords: 'configuration admin' },
 ];
 
@@ -67,5 +68,6 @@ export const ROUTE_TITLES: Record<RouteName, string> = {
   prompts: 'Prompts',
   rules: 'Compliance Rules',
   settings: 'Settings',
+  guide: 'User Guide',
   'not-found': 'Not found',
 };

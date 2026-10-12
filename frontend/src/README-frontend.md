@@ -42,6 +42,7 @@ shapes is `src/types.ts` (a hand mirror of `backend/app/models.py`), for endpoin
 | `views/studio/Blueprints.tsx` | `#/studio/blueprints` | — |
 | `views/studio/BlueprintDesigner.tsx` | `#/studio/blueprints/:id` | `{ id: string }` (`'new'` = blank draft) |
 | `views/studio/Operations.tsx`, `Prompts.tsx`, `Rules.tsx` | `#/studio/…` | — |
+| `views/Guide.tsx` | `#/guide`, `#/guide/:section` | `{ section?: string }` — content in `views/guide/content.ts` (data, tested by `tests/guide.test.ts`) |
 | `views/settings/Settings.tsx` | `#/settings/:tab` | `{ tab: SettingsTab }` (`ai connectors watchers people notifications engine general audit backup`) |
 
 Views are lazy chunks inside a max-width column (`floor` and `blueprint` get full width), wrapped in

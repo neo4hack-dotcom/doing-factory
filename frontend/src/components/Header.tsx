@@ -1,10 +1,10 @@
 // Sticky top bar: page title slot, ⌘K search, "Ask Factory", live dot, notifications, persona and
 // theme. Views set the title with usePageTitle(); otherwise the route's default title shows.
-import { Moon, Search, Sparkles, Sun } from 'lucide-react';
+import { CircleHelp, Moon, Search, Sparkles, Sun } from 'lucide-react';
 import { MOD_LABEL } from '../lib/hotkeys';
 import { ROUTE_TITLES } from '../lib/nav';
 import { usePageTitleValue } from '../lib/pageTitle';
-import { useRoute } from '../lib/router';
+import { navigate, paths, useRoute } from '../lib/router';
 import { useApp } from '../lib/store';
 import { NotificationBell } from './NotificationBell';
 import { PersonaSwitcher } from './PersonaSwitcher';
@@ -41,6 +41,7 @@ export function Header({ onOpenPalette }: { onOpenPalette: () => void }) {
           <span className="grid h-8 w-6 place-items-center"><LiveDot status={live} /></span>
         </Tooltip>
         <NotificationBell />
+        <IconButton icon={CircleHelp} label="User guide" onClick={() => navigate(paths.guide())} />
         <IconButton icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggleTheme} />
       </div>
       <div className="h-6 w-px bg-zinc-200 dark:bg-ink-500" />

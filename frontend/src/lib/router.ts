@@ -5,7 +5,7 @@ import type { AnchorHTMLAttributes, MouseEvent } from 'react';
 
 export type RouteName =
   | 'home' | 'inbox' | 'projects' | 'project-new' | 'project' | 'floor' | 'intake' | 'kpis'
-  | 'blueprints' | 'blueprint' | 'operations' | 'prompts' | 'rules' | 'settings' | 'not-found';
+  | 'blueprints' | 'blueprint' | 'operations' | 'prompts' | 'rules' | 'settings' | 'guide' | 'not-found';
 
 export interface Route {
   name: RouteName;
@@ -36,6 +36,8 @@ const ROUTE_TABLE: Array<[pattern: string, name: RouteName]> = [
   ['/studio/rules', 'rules'],
   ['/settings', 'settings'],
   ['/settings/:tab', 'settings'],
+  ['/guide', 'guide'],
+  ['/guide/:section', 'guide'],
 ];
 
 /** Settings tabs (SPEC §11) — the `:tab` segment of `#/settings/:tab`. */
@@ -103,6 +105,7 @@ export const paths = {
   prompts: () => '/studio/prompts',
   rules: () => '/studio/rules',
   settings: (tab: SettingsTab = 'ai') => `/settings/${tab}`,
+  guide: (section?: string) => (section ? `/guide/${encodeURIComponent(section)}` : '/guide'),
 };
 
 function withQuery(path: string, query?: Record<string, string>): string {
