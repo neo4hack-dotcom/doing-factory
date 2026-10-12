@@ -60,6 +60,9 @@ async def dismiss(id: str, body: dict[str, Any] | None = Body(default=None), use
 
 @router.post("/intake/{id}/analyze")
 async def analyze(id: str) -> dict[str, Any]:
-    """(Re-)run the AI triage: suggested blueprint, priority, team, sponsor, capabilities."""
+    """(Re-)run the AI triage: suggested blueprint, priority, team, sponsor, capabilities.
+    → the IntakeItem. An AI failure (no LLM configured, model error) is not an HTTP error:
+    it is recorded on the item as `ai_error` and the item is returned (200), so the card
+    shows why there is no suggestion. 404 unknown id, 409 not new / already analysing."""
     found(c.store.get("intake", id), "Intake item", id)
-    return shape(IntakeItem, await c.watchers.analyze_intake(id))
+    return shape(IntakeItem, await c.watchers.analyze_intake(id, raise_on_failure=False))

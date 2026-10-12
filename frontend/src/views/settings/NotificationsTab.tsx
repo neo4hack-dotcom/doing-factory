@@ -60,12 +60,12 @@ export default function NotificationsTab() {
         {operations.length === 0 && <Note tone="amber" className="mt-3">No operation yet: create one in Studio › Operations on a notification connector.</Note>}
       </Section>
 
-      <Section title="Digest" subtitle="One summary instead of a stream." icon={Newspaper}>
+      <Section title="Digest" subtitle="One morning summary of what is waiting." icon={Newspaper}>
         <Toggle
           checked={n.digest_enabled}
           onChange={(digest_enabled) => set('notifications', { digest_enabled })}
           label="Daily digest"
-          description="Group notifications into one summary per person instead of a message per event (sent within the business hours of the Engine tab)."
+          description="Each business day (Mon–Fri) at the start of business hours (Engine tab, in its timezone), everyone with something pending gets one summary: inbox counts, overdue items, their high-risk projects and intake waiting. Also sent through the external channel when one is set. Individual notifications keep coming."
         />
       </Section>
 

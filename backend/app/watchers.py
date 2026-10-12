@@ -363,16 +363,23 @@ class WatcherService:
         return fields, notes
 
     # ================================================================== intake decisions
-    async def analyze_intake(self, intake_id: str) -> dict:
-        """AI triage of one new intake item → its `suggestion`. Failures are stored in
-        `ai_error` (and raised, so the caller sees them too)."""
+    async def analyze_intake(self, intake_id: str, *, raise_on_failure: bool = True) -> dict:
+        """AI triage of one new intake item → its `suggestion`. An AI failure — no LLM
+        configured, a model error — is recorded on the item as `ai_error` (ai_busy false,
+        `intake.updated` pushed, the previous suggestion kept) and then raised, or, with
+        `raise_on_failure=False`, the updated item is returned. A later success clears it.
+        Unknown ids (NotFound) and items not analysable now (Conflict) always raise."""
         item = self._intake(intake_id)
         if item.get("status") != "new":
             raise Conflict(f"This item was already {item.get('status')} — only new items are analysed.")
         if intake_id in self._analyzing:
             raise Conflict("The AI is already analysing this item.")
         if not self.c.ai.configured:
-            raise LLMNotConfigured()
+            missing = LLMNotConfigured()
+            doc = self._save_intake(intake_id, ai_busy=False, ai_error=missing.message)
+            if raise_on_failure:
+                raise missing
+            return doc
         self._analyzing.add(intake_id)
         try:
             item = self._save_intake(intake_id, ai_busy=True, ai_error="")
@@ -381,14 +388,33 @@ class WatcherService:
                 answer = await self.c.ai.ask("intake_analyst", prompt, prompt_key="intake_analyst",
                                              json_schema=SUGGESTION_SCHEMA)
                 suggestion = clean_suggestion(answer, catalog)
-            except BaseException as exc:
-                # Cancelled (shutdown) → just clear the spinner; a real failure → say why.
-                self._save_intake(intake_id, ai_busy=False,
-                                  **({} if not isinstance(exc, Exception) else {"ai_error": _message(exc)}))
+            except Exception as exc:
+                doc = self._save_intake(intake_id, ai_busy=False, ai_error=_message(exc))
+                if raise_on_failure:
+                    raise
+                return doc
+            except BaseException:   # cancelled (shutdown): just clear the spinner
+                self._save_intake(intake_id, ai_busy=False)
                 raise
             return self._save_intake(intake_id, ai_busy=False, ai_error="", suggestion=suggestion)
         finally:
             self._analyzing.discard(intake_id)
+
+    def release_llm_waits(self) -> int:
+        """Clear the "no LLM configured" `ai_error` of new, unsuggested items once an LLM is
+        configured, so the scheduler's enrichment triages them (it skips items with an
+        ai_error — and does not run at all without an LLM — so nothing loops meanwhile).
+        Other AI failures stay until an explicit Analyze. Returns how many were released."""
+        if not self.c.ai.configured:
+            return 0
+        missing = LLMNotConfigured().message
+        released = 0
+        for item in self.c.store.list("intake"):
+            if (item.get("status") == "new" and item.get("ai_error") == missing and not item.get("suggestion")
+                    and item.get("id") not in self._analyzing):
+                self._save_intake(item["id"], ai_error="")
+                released += 1
+        return released
 
     async def accept_intake(self, intake_id: str, user_id: str, overrides: dict) -> dict:
         """Start a project from an intake item → the Project. Blueprint precedence: explicit
@@ -473,13 +499,16 @@ class WatcherService:
         return doc
 
     def reset_stale_busy(self) -> int:
-        """Clear `ai_busy` left behind by a process that stopped mid-analysis (nothing in this
-        process is analysing those items). Returns how many were cleared."""
+        """Startup clean-up (called once by the scheduler): clear `ai_busy` left behind by a
+        process that stopped mid-analysis (nothing in this process is analysing those items),
+        and release the items that waited for an LLM if one is configured now (e.g. through
+        the environment). Returns how many busy flags were cleared."""
         cleared = 0
         for item in self.c.store.list("intake"):
             if item.get("ai_busy") and item.get("id") not in self._analyzing:
                 self._save_intake(item["id"], ai_busy=False)
                 cleared += 1
+        self.release_llm_waits()
         return cleared
 
     # ------------------------------------------------------------------ intake helpers

@@ -13,6 +13,7 @@ import importlib
 import inspect
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -134,6 +135,15 @@ def _not_spa(path: str) -> bool:
 
 STATIC_DIR = c.settings.static_path.resolve()
 
+
+def _inside(root: Path, candidate: Path) -> bool:
+    """commonpath, not startswith: "dist2/…" must not pass for "dist/…". On Windows a path on
+    another drive ("/D:/secret") makes commonpath raise instead of answering — that is "outside"."""
+    try:
+        return os.path.commonpath([root, candidate]) == str(root)
+    except ValueError:
+        return False
+
 if (STATIC_DIR / "index.html").is_file():
     if (STATIC_DIR / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
@@ -147,8 +157,7 @@ if (STATIC_DIR / "index.html").is_file():
         if _not_spa(path):
             return JSONResponse({"detail": "Not found"}, status_code=404)
         candidate = (STATIC_DIR / path).resolve()
-        # commonpath, not startswith: "dist2/…" must not pass for "dist/…".
-        if candidate.is_file() and os.path.commonpath([STATIC_DIR, candidate]) == str(STATIC_DIR):
+        if candidate.is_file() and _inside(STATIC_DIR, candidate):
             return FileResponse(candidate)
         return FileResponse(STATIC_DIR / "index.html")   # a client-side route: the SPA decides
 else:

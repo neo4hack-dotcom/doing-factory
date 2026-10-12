@@ -1,8 +1,8 @@
 // Project page header: identity (key, inline-editable title, status, priority, blueprint), risk
 // with an AI "Explain", people, due date and tags; and the project-level actions — AI status
-// report (per audience, copy / print), AI summary, Ask Factory, Cancel.
+// report (per audience, copy / print), AI summary, Ask Factory, the audit dossier download, Cancel.
 import {
-  Ban, Bot, Check, FileBarChart, HelpCircle, Pencil, Printer, Sparkles, Tag, Users, X,
+  Ban, Bot, Check, FileBarChart, FileDown, HelpCircle, Pencil, Printer, Sparkles, Tag, Users, X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -51,6 +51,13 @@ export function ProjectHeader({ project, onChanged, summarizing, onSummarize }: 
     });
   };
 
+  const downloadDossier = () => run('dossier', async () => {
+    const { filename, markdown } = await api.projects.dossier(project.id);
+    const name = filename || `${project.key}-dossier.md`;
+    downloadText(name, markdown, 'text/markdown');
+    toast.success(`${name} downloaded.`);
+  });
+
   return (
     <header className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -68,6 +75,9 @@ export function ProjectHeader({ project, onChanged, summarizing, onSummarize }: 
           <Button size="sm" variant="ai" icon={FileBarChart} onClick={() => setReportOpen(true)}>Status report</Button>
           <Button size="sm" variant="outline" icon={Sparkles} busy={summarizing} onClick={onSummarize}>Summarize</Button>
           <Button size="sm" variant="outline" icon={Bot} onClick={() => openCopilot({ projectId: project.id })}>Ask Factory</Button>
+          <Tooltip content="Audit pack: steps, artifacts, approvals, gate checks, links and the verified audit trail (Markdown)">
+            <Button size="sm" variant="outline" icon={FileDown} busy={busy === 'dossier'} onClick={() => void downloadDossier()}>Download dossier</Button>
+          </Tooltip>
           {!finished && (
             <Tooltip content="Cancel this project">
               <IconButton icon={Ban} label="Cancel project" variant="outline" busy={busy === 'cancel'} onClick={() => void cancel()} />
@@ -286,6 +296,19 @@ function ReportModal({ open, onClose, project }: { open: boolean; onClose: () =>
       {content}
     </Modal>
   );
+}
+
+/** Saves `text` as a file through a temporary object URL (no server round-trip). */
+function downloadText(filename: string, text: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /**

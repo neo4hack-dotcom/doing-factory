@@ -31,12 +31,12 @@ The contract for every contributor is [`docs/SPEC.md`](docs/SPEC.md). The UI is 
 |---|---|
 | **Home** | Command center for the current persona: AI morning briefing, "Needs you" list with one-click actions, KPI strip, factory flow, live activity |
 | **Inbox** | Every task waiting for you (forms, approvals, estimates, confirmations, quality gates, failures, intake) with the action panel inline — `j`/`k`, `a` approve, `r` reject |
-| **Projects** | Table / board / tree portfolio; project page with stage pipeline, step drawer, artifacts with versions, activity, live agent trace, dependency graph, AI status report, risk explanation |
+| **Projects** | Table / board / tree portfolio; project page with stage pipeline, step drawer, artifacts with versions, activity, live agent trace, dependency graph, AI status report, risk explanation, **audit dossier** export (Markdown: step log, artifacts, approvals, gate checks, hash-verified audit trail) |
 | **Factory Floor** | Live board: every project as a token in its current stage, AI workers ticker (LLM calls, tool calls, agent thoughts) |
 | **Intake** | Items detected by the watchers, triaged by the AI (blueprint, priority, team, sponsor), accepted in one click; "Simulate a sponsor creating a use case" on the sandbox |
 | **KPIs** | Lead time, throughput, stage bottleneck heatmap, SLA, approvals by role, AI automation share & hours saved, quality first-pass rate, LLM usage, intake funnel, workload |
 | **Studio** | Visual **Blueprint designer** (10 step types, type-specific forms, variable helper, validation, *Generate with AI*), **Operations** (MCP bindings: direct / LLM-built / agent, with *Try it*), **Prompt library**, **Compliance rules** |
-| **Settings** | AI model (presets, model picker, live test), MCP connectors + tool bench, watchers (schedules, mappings), people / teams / roles, notifications, engine autonomy & scheduler, hours-saved baselines, tamper-evident audit log, backup / import, demo environment |
+| **Settings** | AI model (presets, model picker, live test), MCP connectors + tool bench, watchers (schedules, mappings), people / teams / roles, notifications (+ **daily digest** on business days), engine autonomy & scheduler, hours-saved baselines, tamper-evident audit log, backup / import, demo environment |
 | **Copilot** | "Ask the Factory" chat over the whole portfolio, read-only tools, answers cite projects as clickable chips |
 | **Factory MCP** | The Factory itself is an MCP server at `/mcp` (projects, approvals, KPIs) for other agents |
 
@@ -44,6 +44,11 @@ The contract for every contributor is [`docs/SPEC.md`](docs/SPEC.md). The UI is 
 estimation (AI suggestion) · MCP operation (writes need confirmation by default) · agent (bounded
 tool-calling loop, pauses before writes) · quality gate (AI compliance audit, override / send back) ·
 fan-out (one child project per item) · notify · wait for (polls an external status).
+
+**Business-analysis know-how from DOINg.BA:** test plans come with a UAT table and Gherkin
+`Feature/Scenario/Given/When/Then` acceptance scenarios (highlighted in the UI, *Copy .feature*),
+estimates follow DOINg.BA's method (Fibonacci points, T-shirt size, complexity, confidence),
+Jira stories carry Given/When/Then acceptance criteria and a WSJF-informed priority.
 
 **Look:** brand colour **Pantone 340 C** — RGB (0, 148, 100), `#009464` (Tailwind `brand` scale in
 `frontend/tailwind.config.js`), light and dark mode, self-hosted Inter (works offline).
@@ -97,6 +102,31 @@ in Settings › AI Model. The one-click **Sandbox demo** (in onboarding and in t
 - two sandbox MCP connectors;
 - the operations the builtin blueprints call;
 - the *New DOINg.AI use cases* watcher.
+
+## Windows
+
+The Factory runs on Windows 10/11 with Python 3.12+ (`py` launcher) and Node 20+:
+
+```bat
+install-windows.bat   :: once — venv, pip (incl. tzdata), npm install, long paths, backend\.env
+start-windows.bat     :: development — API window on :3071, UI window on :3070, opens the browser
+serve-windows.bat     :: production — builds the UI, then one process on :3071 (--no-build to skip)
+```
+
+What is specific to Windows, and already handled:
+
+- **No `--reload` for the API.** uvicorn's reloader puts asyncio on the Selector loop, which cannot
+  start subprocesses, so no local (stdio) MCP server — including the bundled DOINg.AI and Jira
+  servers — could start. The scripts run `python -m app`; restart the API window after a backend change.
+  (If you start it with `--reload` anyway, connectors fail with a message saying exactly that.)
+- **Time zones:** Windows has no IANA database, so `tzdata` is installed there; otherwise the scheduler
+  timezone (Europe/Paris by default) would silently become UTC.
+- **MCP servers:** `.cmd` launchers (`npx`, `uvx`) are resolved through `PATH`, children get UTF-8 pipes
+  (`PYTHONUTF8`), no console window pops up, and the sandbox servers lock their state with `msvcrt`.
+- **Batch files keep CRLF** (`.gitattributes`), and every text file is read and written as UTF-8.
+
+`backend/tests/test_windows_compat.py` pins these rules so they are checked on any OS. Not yet
+verified on a physical Windows machine.
 
 ## Production (single origin)
 

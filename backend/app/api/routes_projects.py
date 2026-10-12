@@ -1,5 +1,5 @@
 """Projects and step actions (SPEC §9): /projects (list, create, get, patch, cancel, delete,
-events, comments, artifacts, links, report, explain-risk, summarize) and
+events, comments, artifacts, links, dossier, report, explain-risk, summarize) and
 /projects/{id}/steps/{step_id}/<action>.
 
 Thin by design: the engine is the only writer of projects (it serialises work per project and
@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body
 
-from app import ai_utils
+from app import ai_utils, dossier
 from app.api import shape, shape_all
 from app.deps import container as c
 from app.errors import Conflict, FactoryError, Forbidden, NotFound
@@ -182,6 +182,13 @@ async def add_link(id: str, body: dict[str, Any] = Body(...), user_id: str = "")
         raise FactoryError("A link URL must start with http:// or https://.", 422)
     link = {"kind": kind, "label": label or url, "url": url, "external_id": str(body.get("external_id") or "")}
     return project_out(await c.engine.add_link(id, _acting(body, user_id), link))
+
+
+@router.get("/projects/{id}/dossier")
+async def project_dossier(id: str) -> dict[str, Any]:
+    """The audit / compliance pack of a project as Markdown (deterministic, no LLM)."""
+    project = project_out(c.engine.get(id))
+    return {"filename": dossier.dossier_filename(project), "markdown": dossier.build_dossier(c, project)}
 
 
 @router.post("/projects/{id}/report")

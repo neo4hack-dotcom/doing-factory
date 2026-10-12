@@ -10,12 +10,14 @@
 //   ```chart
 //   {"type": "bar" | "donut" | "kpi", "title": "…", "data": [{"label": "…", "value": 5, "color": "#009464"}]}
 //   ```
-// rendered as inline SVG; an invalid spec degrades to a JSON code block.
+// rendered as inline SVG; an invalid spec degrades to a JSON code block. ```gherkin (or ```feature)
+// blocks get keyword highlighting (built as spans, never HTML strings) and a "Copy .feature" button.
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
 import { cls } from '../lib/cls';
 import { formatCompact } from '../lib/format';
 import { BarChart, Donut, safeColor, seriesColor } from './Charts';
+import { CopyButton } from './ui';
 
 export type MarkdownSize = 'xs' | 'sm';
 
@@ -197,6 +199,65 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ```gherkin blocks
+// ---------------------------------------------------------------------------------------------
+
+const GK = {
+  section: 'font-semibold text-brand-300',   // Feature:, Background:, Scenario:, Examples: …
+  step: 'font-semibold text-sky-300',        // Given / When / Then / And / But
+  value: 'text-amber-300',                   // "strings" and <placeholders>
+  tag: 'text-violet-300',                    // @tags
+  comment: 'italic text-zinc-500',           // # comments
+  pipe: 'text-zinc-500',                     // Examples / data table borders
+};
+const GK_SECTION = /^(\s*)(Feature|Rule|Background|Scenario Outline|Scenario Template|Scenario|Example|Examples|Scenarios):(.*)$/;
+const GK_STEP = /^(\s*)(Given|When|Then|And|But|\*)(\s.*)?$/;
+const GK_VALUE = /("[^"]*"|<[^<>\s][^<>]*>)/;
+
+/** Splits step text into plain runs and highlighted "strings" / <placeholders>. */
+function gherkinValues(text: string, key: string): ReactNode[] {
+  // split() with one capturing group puts the matches at the odd indexes.
+  return text.split(GK_VALUE).flatMap((part, i): ReactNode[] => {
+    if (!part) return [];
+    return i % 2 ? [<span key={`${key}v${i}`} className={GK.value}>{part}</span>] : [part];
+  });
+}
+
+function gherkinLine(line: string, key: string): ReactNode[] {
+  const t = line.trim();
+  if (t.startsWith('#')) return [<span key={key} className={GK.comment}>{line}</span>];
+  if (t.startsWith('@')) return [<span key={key} className={GK.tag}>{line}</span>];
+  if (t.startsWith('"""') || t.startsWith('```')) return [<span key={key} className={GK.value}>{line}</span>];
+  const section = GK_SECTION.exec(line);
+  if (section) return [section[1], <span key={key} className={GK.section}>{section[2]}:</span>, section[3]];
+  const step = GK_STEP.exec(line);
+  if (step) return [step[1], <span key={key} className={GK.step}>{step[2]}</span>, ...gherkinValues(step[3] ?? '', key)];
+  if (t.startsWith('|')) {
+    return line.split('|').flatMap((cell, i) => (i === 0 ? [cell] : [<span key={`${key}p${i}`} className={GK.pipe}>|</span>, ...gherkinValues(cell, `${key}c${i}`)]));
+  }
+  return [line];
+}
+
+function GherkinBlock({ source, s }: { source: string; s: Styles }) {
+  const lines = source.split('\n');
+  return (
+    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-ink-500" data-lang="gherkin">
+      <div className="flex items-center justify-between gap-2 border-b border-zinc-200 bg-zinc-50 py-1 pl-3 pr-1 dark:border-ink-500 dark:bg-ink-700">
+        <span className="label-xs">Gherkin</span>
+        <CopyButton text={source.endsWith('\n') ? source : `${source}\n`} label="Copy .feature" size="xs" />
+      </div>
+      <pre className={cls(CLS.pre, s.pre, 'rounded-none border-0')}>
+        <code>
+          {lines.map((line, i) => (
+            <span key={i}>{gherkinLine(line, `g${i}`)}{i < lines.length - 1 ? '\n' : ''}</span>
+          ))}
+        </code>
+      </pre>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Block parser
 // ---------------------------------------------------------------------------------------------
 
@@ -257,6 +318,10 @@ function parseBlocks(src: string, s: Styles): ReactNode[] {
           out.push(<ChartBlock key={key()} spec={spec} />);
           continue;
         }
+      }
+      if (lang === 'gherkin' || lang === 'feature' || lang === 'cucumber') {
+        out.push(<GherkinBlock key={key()} source={body} s={s} />);
+        continue;
       }
       out.push(<pre key={key()} className={cls(CLS.pre, s.pre)}><code>{body}</code></pre>);
       continue;

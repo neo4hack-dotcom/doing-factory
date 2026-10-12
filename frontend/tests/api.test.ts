@@ -45,6 +45,7 @@ describe('endpoint mapping', () => {
     ['projects.cancel', () => api.projects.cancel('prj_1', U, 'why'), 'POST', '/api/projects/prj_1/cancel', { user_id: U, reason: 'why' }],
     ['projects.comment', () => api.projects.comment('prj_1', U, 'hi'), 'POST', '/api/projects/prj_1/comments', { user_id: U, text: 'hi' }],
     ['projects.updateArtifact', () => api.projects.updateArtifact('prj_1', 'art_1', U, 'c'), 'PUT', '/api/projects/prj_1/artifacts/art_1', { user_id: U, content: 'c' }],
+    ['projects.dossier', () => api.projects.dossier('prj_1'), 'GET', '/api/projects/prj_1/dossier'],
     ['projects.report', () => api.projects.report('prj_1', 'executive'), 'POST', '/api/projects/prj_1/report', { audience: 'executive' }],
     ['projects.addLink', () => api.projects.addLink('prj_1', U, { kind: 'jira', label: 'MCPF-1' }), 'POST', '/api/projects/prj_1/links', { kind: 'jira', label: 'MCPF-1', user_id: U }],
     ['projects.explainRisk', () => api.projects.explainRisk('prj_1'), 'POST', '/api/projects/prj_1/explain-risk'],

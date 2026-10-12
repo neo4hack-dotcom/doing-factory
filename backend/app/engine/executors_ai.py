@@ -863,8 +863,12 @@ async def suggest_estimate(sc: StepCtx) -> dict:
     schema = {"type": "object", "required": ["value", "confidence", "breakdown", "rationale"], "properties": {
         "value": {"type": "number"}, "unit": {"type": "string", "enum": [unit]},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "breakdown": {"type": "array", "items": {"type": "object", "required": ["item", "value"],
-                                                 "properties": {"item": {"type": "string"}, "value": {"type": "number"}}}},
+        "breakdown": {"type": "array", "items": {"type": "object", "required": ["item", "value"], "properties": {
+            "item": {"type": "string"}, "value": {"type": "number"},
+            # optional DOINg.BA sizing per line, folded into the line's text by normalise_estimate
+            # (no enums: an off-vocabulary value is dropped, never a reason to re-ask the model)
+            "tshirt": {"type": "string"}, "complexity": {"type": "string"},
+            "confidence": {"type": "string"}, "rationale": {"type": "string"}}}},
         "rationale": {"type": "string"}}}
     value = await _ask(sc, "estimator", "\n\n".join(parts), prompt_key="estimator", json_schema=schema)
     return normalise_estimate(value, unit, sc)
@@ -876,7 +880,7 @@ def normalise_estimate(value: Any, unit: str, sc: StepCtx | None = None) -> dict
     for line in data.get("breakdown") or []:
         if isinstance(line, dict) and str(line.get("item") or "").strip():
             amount = coerce_field(line.get("value"), _NumberField)
-            lines.append({"item": str(line["item"]).strip(), "value": amount if amount is not _SKIP else 0})
+            lines.append({"item": _line_label(line), "value": amount if amount is not _SKIP else 0})
     total = coerce_field(data.get("value"), _NumberField)
     total = None if total is _SKIP else total
     summed = round(sum(l["value"] for l in lines), 1) if lines else None
@@ -890,6 +894,30 @@ def normalise_estimate(value: Any, unit: str, sc: StepCtx | None = None) -> dict
         "value": total, "unit": unit, "confidence": confidence if confidence in ("low", "medium", "high") else "low",
         "breakdown": lines, "rationale": str(data.get("rationale") or "").strip()})
     return estimate.model_dump()
+
+
+_TSHIRTS = ("XS", "S", "M", "L", "XL")
+
+
+def _line_label(line: dict) -> str:
+    """A breakdown line's text, with the optional per-line sizing (T-shirt, complexity,
+    confidence, rationale) folded in, so EstimateLine keeps its {item, value} shape:
+    "Implement get_balance tool (M · medium complexity · high confidence) — one existing API"."""
+    item = str(line.get("item") or "").strip()
+    tags = []
+    tshirt = str(line.get("tshirt") or "").strip().upper()
+    if tshirt in _TSHIRTS:
+        tags.append(tshirt)
+    for key in ("complexity", "confidence"):
+        level = str(line.get(key) or "").strip().lower()
+        if level in ("low", "medium", "high"):
+            tags.append(f"{level} {key}")
+    if tags and "(" not in item:
+        item = f"{item} ({' · '.join(tags)})"
+    why = str(line.get("rationale") or "").strip()
+    if why and why not in item:
+        item = f"{item} — {truncate(why, 160)}"
+    return item
 
 
 class _NumberField:   # coerce_field's view of a "number" form field

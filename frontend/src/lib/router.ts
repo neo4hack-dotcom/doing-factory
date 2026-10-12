@@ -1,6 +1,6 @@
 // Tiny hash router (docs/SPEC.md §11). Hash URLs keep deep links working when the backend serves
 // the SPA from any path, with no server-side rewrite rules and no router dependency.
-import { createElement, useSyncExternalStore } from 'react';
+import { createElement, useEffect, useRef, useSyncExternalStore } from 'react';
 import type { AnchorHTMLAttributes, MouseEvent } from 'react';
 
 export type RouteName =
@@ -110,9 +110,91 @@ function withQuery(path: string, query?: Record<string, string>): string {
   return entries.length ? `${path}?${new URLSearchParams(entries).toString()}` : path;
 }
 
-/** Navigates to an app path ("/projects/prj_1"). `replace` avoids a history entry (redirects, filters). */
-export function navigate(path: string, opts: { replace?: boolean } = {}): void {
-  const target = `#${path.startsWith('/') ? path : `/${path}`}`;
+// ---------------------------------------------------------------------------------- leave guards
+/**
+ * A navigation guard answers "may the user leave the current page for `to`?" (an app path such as
+ * "/projects/prj_1"). It may ask — typically `window.confirm` while an editor has unsaved changes —
+ * and returns false to cancel the navigation.
+ */
+export type NavigationGuard = (to: string) => boolean;
+
+let guards: NavigationGuard[] = [];
+/** Target approved by an anchor click a moment ago: the Link handler's navigate() must not ask twice. */
+let approved: string | null = null;
+
+const hashOf = (path: string) => `#${path.startsWith('/') ? path : `/${path}`}`;
+
+/** Registers a guard consulted by navigate() and by in-app link clicks; returns its unregister. */
+export function registerNavigationGuard(guard: NavigationGuard): () => void {
+  guards = [...guards, guard];
+  if (guards.length === 1 && typeof window !== 'undefined') window.addEventListener('click', guardLinkClick, true);
+  return () => {
+    const before = guards.length;
+    guards = guards.filter((g) => g !== guard);
+    if (before && !guards.length && typeof window !== 'undefined') window.removeEventListener('click', guardLinkClick, true);
+  };
+}
+
+/** Runs the guards (newest first, stopping at the first refusal). True = the navigation may proceed. */
+export function confirmNavigation(path: string): boolean {
+  const to = hashOf(path).slice(1);
+  for (const guard of [...guards].reverse()) {
+    if (!guard(to)) return false;
+  }
+  return true;
+}
+
+/**
+ * Capture-phase click on an in-app `<a href="#/…">` (Links and plain anchors alike): runs the guards
+ * before the router's handler or the browser follows the link, and remembers the approval so the
+ * Link's own navigate() call does not ask a second time.
+ */
+function guardLinkClick(e: globalThis.MouseEvent): void {
+  if (!guards.length || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const anchor = (e.target as Element | null)?.closest?.('a[href^="#"]') as HTMLAnchorElement | null;
+  const target = anchor?.getAttribute('href') ?? '';
+  if (!anchor || anchor.target === '_blank' || target === location.hash) return;
+  if (!confirmNavigation(target.slice(1))) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  approved = target;
+  setTimeout(() => { approved = null; }, 0);
+}
+
+/**
+ * While `dirty`, asks before leaving the page: closing or reloading the tab (beforeunload), in-app
+ * link clicks and programmatic navigate() calls (⌘K, buttons). Used by the Studio editors and the
+ * Settings forms.
+ */
+export function useUnsavedChangesGuard(dirty: boolean, message = 'You have unsaved changes. Leave without saving?'): void {
+  const ref = useRef({ dirty, message });
+  ref.current = { dirty, message };
+  useEffect(() => {
+    const beforeUnload = (e: BeforeUnloadEvent) => {
+      if (!ref.current.dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    const unregister = registerNavigationGuard(() => !ref.current.dirty || window.confirm(ref.current.message));
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => {
+      unregister();
+      window.removeEventListener('beforeunload', beforeUnload);
+    };
+  }, []);
+}
+
+/**
+ * Navigates to an app path ("/projects/prj_1"). `replace` avoids a history entry (redirects, filters).
+ * Registered guards are consulted first (an unsaved editor may cancel); `force` skips them — for a
+ * caller that already confirmed, or that just saved and moves to the saved record.
+ */
+export function navigate(path: string, opts: { replace?: boolean; force?: boolean } = {}): void {
+  const target = hashOf(path);
+  if (target !== location.hash && !opts.force && approved !== target && !confirmNavigation(path)) return;
+  approved = null;
   if (opts.replace) {
     history.replaceState(history.state, '', target);
     window.dispatchEvent(new HashChangeEvent('hashchange'));
