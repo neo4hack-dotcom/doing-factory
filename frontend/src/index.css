@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Self-hosted variable Inter (48 KB): no font CDN, so the Factory renders identically air-gapped. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+/* Chart series colours as CSS variables so every SVG chart follows the theme without re-rendering.
+   Brand green (Pantone 340 C) leads; the other greens of the former palette were replaced by orange (3)
+   and violet (6) so no series can be mistaken for the brand. Dark steps are selected for the ink surface, not flipped. */
+:root {
+  --series-1: #009464;
+  --series-2: #2a78d6;
+  --series-3: #e8590c;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #7c3aed;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --chart-grid: #e4e4e7;
+  --chart-axis: #a1a1aa;
+  --chart-surface: #ffffff;
+}
+.dark {
+  --series-1: #22a87c;
+  --series-2: #3987e5;
+  --series-3: #f0743a;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #a78bfa;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --chart-grid: #26262e;
+  --chart-axis: #71717a;
+  --chart-surface: #0f0f11;
+}
+
+@layer base {
+  :root { color-scheme: light; }
+  .dark { color-scheme: dark; }
+
+  html, body, #root { height: 100%; }
+
+  body {
+    @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-ink-950 dark:text-zinc-100;
+    /* Inter alternates: disambiguated 1/I/l, which matters in an app full of keys, ids and model names. */
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection { @apply bg-brand-500 text-white; }
+
+  /* Thin scrollbars that only show up when used; brand on hover, like DOINg.AI. */
+  * { scrollbar-width: thin; scrollbar-color: rgb(212 212 216) transparent; }
+  .dark * { scrollbar-color: #26262e transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full border-[3px] border-solid border-transparent bg-zinc-300 bg-clip-content;
+  }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-brand-500; }
+  .dark ::-webkit-scrollbar-thumb { @apply bg-ink-500; }
+  .dark ::-webkit-scrollbar-thumb:hover { @apply bg-brand-500; }
+
+  /* Keyboard focus ring for controls; text fields draw their own focus style (border + soft ring). */
+  :focus-visible:not(input, textarea, select) { @apply outline-none ring-2 ring-brand-500/50 ring-offset-0; }
+}
+
+@layer components {
+  /* Surfaces — one definition each so every card/panel has the same border weight. */
+  .card {
+    @apply rounded-xl border border-zinc-200 bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04)]
+           dark:border-ink-600 dark:bg-ink-800 dark:shadow-none;
+  }
+  .surface { @apply border-zinc-200 bg-white dark:border-ink-600 dark:bg-ink-800; }
+  .surface-deep { @apply border-zinc-200 bg-zinc-50 dark:border-ink-600 dark:bg-ink-900; }
+  .surface-flat { @apply border-zinc-200 bg-zinc-100 dark:border-ink-500 dark:bg-ink-700; }
+  .surface-glass { @apply border-zinc-200/80 bg-white/75 backdrop-blur-md dark:border-ink-600/80 dark:bg-ink-900/75; }
+  .hairline { @apply border-zinc-200 dark:border-ink-600; }
+
+  /* Typography vocabulary (DOINg.AI): uppercase micro-labels, muted text, tabular figures. */
+  .label-xs { @apply text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400; }
+  .text-muted { @apply text-zinc-500 dark:text-zinc-400; }
+  .text-faint { @apply text-zinc-400 dark:text-zinc-500; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wordmark { @apply font-black tracking-tight; }
+
+  /* Gradient reserved for AI / "wow" accents: AI buttons, running steps, Floor tokens. */
+  .btn-ai {
+    @apply bg-gradient-to-r from-brand-600 via-brand-500 to-teal-400 text-white shadow-brand
+           hover:brightness-110 active:brightness-95;
+    background-size: 200% 200%;
+  }
+  .text-ai { @apply bg-gradient-to-r from-brand-500 to-amber-500 bg-clip-text text-transparent; }
+  .ring-ai { box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.45), 0 0 0 4px rgba(139, 92, 246, 0.12); }
+
+  /* Subtle brand grid behind hero areas. */
+  .grid-bg {
+    background-image:
+      linear-gradient(rgba(0, 148, 100, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 148, 100, 0.05) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+
+  /* Skeleton shimmer while data loads. */
+  .shimmer {
+    @apply animate-shimmer bg-zinc-200/80 dark:bg-ink-600;
+    background-image: linear-gradient(90deg, transparent 8%, rgba(255, 255, 255, 0.55) 28%, transparent 48%);
+    background-size: 200% 100%;
+  }
+  .dark .shimmer {
+    background-image: linear-gradient(90deg, transparent 8%, rgba(255, 255, 255, 0.06) 28%, transparent 48%);
+  }
+
+  /* Striped fill for running progress bars. */
+  .stripes {
+    background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.18) 25%, transparent 25%,
+      transparent 50%, rgba(255, 255, 255, 0.18) 50%, rgba(255, 255, 255, 0.18) 75%, transparent 75%, transparent);
+    background-size: 1rem 1rem;
+  }
+  /* Hatched fill for skipped segments. */
+  .hatched {
+    background-image: repeating-linear-gradient(135deg, rgba(113, 113, 122, 0.25) 0 2px, transparent 2px 6px);
+  }
+
+  .scroll-thin { scrollbar-width: thin; }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Print helpers: status reports and release dossiers print without the app chrome. */
+@media print {
+  body { background: white !important; color: black !important; }
+  .no-print { display: none !important; }
+  .print-only { display: block !important; }
+  .print-page { break-after: page; }
+  .print-section { break-inside: avoid; }
+  .card { box-shadow: none !important; border-color: #ddd !important; }
+}
+.print-only { display: none; }

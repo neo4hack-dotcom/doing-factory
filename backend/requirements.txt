@@ -1,0 +1,15 @@
+# DOINg.AI Factory backend — pins follow the set already proven together in the user's
+# other apps (dataloom/server/.venv, agent/backend/.venv).
+fastapi==0.141.1
+uvicorn[standard]==0.34.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+httpx==0.28.1
+jinja2==3.1.6
+# Starlette floors for the CVEs a network-facing server cares about (see agent/backend/requirements.txt)
+starlette>=0.49.1
+python-multipart>=0.0.18
+h11>=0.16.0
+
+# dev / tests
+pytest==8.4.2
