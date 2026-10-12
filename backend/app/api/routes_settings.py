@@ -49,6 +49,8 @@ async def put_settings(body: dict[str, Any] = Body(...), user_id: str = "") -> d
         c.record_event("settings.updated",
                        "Settings updated: " + ", ".join(SECTION_LABELS[s] for s in sections),
                        actor=acting, data={"sections": sections, "fields": changed})
+        if "llm" in sections:   # intake items that waited for an LLM become triage candidates again
+            c.watchers.release_llm_waits()
     return public_settings(after)
 
 

@@ -167,7 +167,7 @@ export default function BlueprintDesigner({ id }: BlueprintDesignerProps) {
       clearGeneratedDraft();
       toast.success(`Saved “${saved.name}” · v${saved.version}${saved.status !== 'active' ? ` (${saved.status})` : ''}`);
       void reload();
-      if (!bp.id) navigate(paths.blueprint(saved.id), { replace: true });
+      if (!bp.id) navigate(paths.blueprint(saved.id), { replace: true, force: true });
       api.blueprints.validate(next).then((r) => setReport(mapReport(r, next))).catch(() => undefined);
     } catch (err) {
       // An active blueprint must be valid: offer to keep the work as a draft.
@@ -186,7 +186,7 @@ export default function BlueprintDesigner({ id }: BlueprintDesignerProps) {
     if (dirty && !(await confirm({ title: 'Discard unsaved changes?', message: 'Your edits to this blueprint will be lost.', tone: 'warning', confirmLabel: 'Discard' }))) return;
     if (isNew) clearGeneratedDraft();
     setLoaded((cur) => (cur ? { ...cur, baseline: fingerprint(cur.bp) } : cur));
-    navigate(paths.blueprints());
+    navigate(paths.blueprints(), { force: true });
   };
 
   const duplicate = () => run('duplicate', async () => {
@@ -196,7 +196,7 @@ export default function BlueprintDesigner({ id }: BlueprintDesignerProps) {
     toast.success(`Created “${copy.name}” (draft) — customise it safely.`);
     await reload();
     setLoaded((cur) => (cur ? { ...cur, baseline: fingerprint(cur.bp) } : cur));
-    navigate(paths.blueprint(copy.id));
+    navigate(paths.blueprint(copy.id), { force: true });
   });
 
   // ---- canvas operations ----------------------------------------------------------------------

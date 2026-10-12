@@ -9,6 +9,7 @@ import { api } from '../../api';
 import type { SettingsPatch } from '../../api';
 import { Button, Card, CardHeader, IconButton, Input, Textarea, TONE, useToast } from '../../components/ui';
 import { cls } from '../../lib/cls';
+import { useUnsavedChangesGuard } from '../../lib/router';
 import { useApp } from '../../lib/store';
 import type { AppSettings, Tone } from '../../types';
 
@@ -38,6 +39,7 @@ export function useSettingsDraft<K extends SectionKey>(keys: readonly K[]) {
   const [draft, setDraft] = useState<Pick<AppSettings, K>>(() => pick(settings));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  useUnsavedChangesGuard(dirty, 'These settings have unsaved changes. Leave without saving?');
 
   useEffect(() => {
     if (!dirty) setDraft(pick(settings));

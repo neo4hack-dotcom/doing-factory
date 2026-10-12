@@ -1077,6 +1077,12 @@ export interface ChainVerification {
   broken_at?: string | null;
 }
 
+/** GET /projects/{id}/dossier — the project's audit / compliance pack as a Markdown file. */
+export interface ProjectDossier {
+  filename: string;   // "<KEY>-dossier.md"
+  markdown: string;
+}
+
 export interface Briefing {
   markdown: string;
   generated_at: string;

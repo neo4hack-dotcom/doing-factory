@@ -104,3 +104,60 @@ describe('```chart blocks', () => {
     assert.equal(parseChartSpec('{"type":"donut","data":[{"label":"a","value":"4"}]}')?.data[0].value, 4);
   });
 });
+
+describe('```gherkin blocks', () => {
+  const feature = [
+    '@uat',
+    'Feature: Nostro balances',
+    '  As a treasury agent I want balances so that I can forecast liquidity',
+    '  # shared context',
+    '  Background:',
+    '    Given an authenticated agent',
+    '  Scenario Outline: Balance per account',
+    '    When get_balance is called with "<account>"',
+    '    Then the balance <amount> is returned',
+    '    And the call is audited',
+    '    But no write happens',
+    '    Examples:',
+    '      | account | amount |',
+    '      | ACC-1   | 100    |',
+    '  Scenario: <script>alert(1)</script>',
+    '    Then nothing is injected',
+  ].join('\n');
+
+  test('keywords are highlighted with spans and the source text is kept', () => {
+    const out = html('### Acceptance\n\n```gherkin\n' + feature + '\n```');
+    assert.match(out, /data-lang="gherkin"/);
+    for (const kw of ['Feature:', 'Background:', 'Scenario Outline:', 'Examples:', 'Scenario:']) {
+      assert.match(out, new RegExp(`<span class="font-semibold text-brand-300">${kw}</span>`), kw);
+    }
+    for (const kw of ['Given', 'When', 'Then', 'And', 'But']) {
+      assert.match(out, new RegExp(`<span class="font-semibold text-sky-300">${kw}</span>`), kw);
+    }
+    assert.match(out, /<span class="text-amber-300">&quot;&lt;account&gt;&quot;<\/span>/);
+    assert.match(out, /<span class="text-amber-300">&lt;amount&gt;<\/span>/);
+    assert.match(out, /<span class="text-violet-300">@uat<\/span>/);
+    assert.match(out, /<span class="italic text-zinc-500">  # shared context<\/span>/);
+    assert.match(out, /Copy \.feature/);
+    // nothing from the block is turned into markup
+    assert.ok(!out.includes('<script'));
+    // stripping the tags gives back the exact .feature text
+    const code = /<code>([\s\S]*?)<\/code>/.exec(out)![1].replace(/<[^>]+>/g, '')
+      .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    assert.equal(code, feature);
+  });
+
+  test('feature/cucumber aliases highlight, other fences stay plain', () => {
+    assert.match(html('```feature\nFeature: x\n```'), /data-lang="gherkin"/);
+    assert.match(html('```cucumber\nGiven x\n```'), /text-sky-300/);
+    const plain = html('```\nFeature: x\n```');
+    assert.ok(!plain.includes('data-lang="gherkin"'));
+    assert.ok(!plain.includes('Copy .feature'));
+  });
+
+  test('pathological gherkin terminates', () => {
+    for (const md of ['```gherkin', '```gherkin\n', '```gherkin\n|||\n"""\n<\n"\n```', '```gherkin\nGiven\nWhen "unclosed\n']) {
+      assert.equal(typeof html(md), 'string');
+    }
+  });
+});

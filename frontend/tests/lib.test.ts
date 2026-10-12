@@ -8,7 +8,9 @@ import {
 import { comboOf, SequenceMatcher } from '../src/lib/hotkeys';
 import { isCloudModel, llmLocality } from '../src/lib/llm';
 import { NAV_ITEMS, ROUTE_TITLES, SETTINGS_NAV } from '../src/lib/nav';
-import { isActivePath, parseRoute, paths, SETTINGS_TABS } from '../src/lib/router';
+import {
+  confirmNavigation, isActivePath, navigate, parseRoute, paths, registerNavigationGuard, SETTINGS_TABS,
+} from '../src/lib/router';
 import { PRIORITY, STEP_STATUS, statusMeta } from '../src/lib/status';
 import { STEP_TYPE_ORDER, STEP_TYPES } from '../src/types';
 import { backoffDelay, wsUrl } from '../src/ws';
@@ -103,6 +105,52 @@ describe('router', () => {
     assert.ok(isActivePath('/projects/prj_1', '/projects'));
     assert.ok(!isActivePath('/projects', '/'));
     assert.ok(isActivePath('/', '/'));
+  });
+
+  test('navigation guards can cancel programmatic navigate() calls', () => {
+    const g = globalThis as unknown as { location?: { hash: string } };
+    const saved = g.location;
+    g.location = { hash: '#/' };
+    try {
+      navigate('/projects');
+      assert.equal(g.location.hash, '#/projects');
+
+      const asked: string[] = [];
+      let allow = false;
+      const unregister = registerNavigationGuard((to) => { asked.push(to); return allow; });
+      navigate(paths.inbox());
+      assert.equal(g.location.hash, '#/projects', 'a refusing guard keeps the user on the page');
+      assert.deepEqual(asked, ['/inbox']);
+
+      navigate('/projects');                       // same place: nothing to leave, nobody asked
+      assert.deepEqual(asked, ['/inbox']);
+
+      navigate('/kpis', { force: true });           // the caller already confirmed (or just saved)
+      assert.equal(g.location.hash, '#/kpis');
+      assert.equal(asked.length, 1);
+
+      allow = true;
+      navigate('floor');
+      assert.equal(g.location.hash, '#/floor');
+      assert.deepEqual(asked, ['/inbox', '/floor']);
+
+      // Newest guard first; the first refusal stops the chain.
+      const order: string[] = [];
+      const second = registerNavigationGuard(() => { order.push('second'); return false; });
+      assert.equal(confirmNavigation('/intake'), false);
+      assert.deepEqual(order, ['second']);
+      assert.equal(asked.length, 2, 'older guards are not asked once a newer one refused');
+      second();
+      assert.equal(confirmNavigation('/intake'), true);
+
+      unregister();
+      assert.equal(confirmNavigation('/intake'), true);
+      navigate('/intake');
+      assert.equal(g.location.hash, '#/intake');
+      assert.equal(asked.length, 3, 'an unregistered guard is never consulted again');
+    } finally {
+      g.location = saved;
+    }
   });
 
   test('navigation vocabulary covers every route and settings tab', () => {

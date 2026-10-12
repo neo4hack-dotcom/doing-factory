@@ -534,7 +534,7 @@ BACKLOG_PROMPT = _t("""
     {% endif %}
     Write 4 to 8 stories: one per tool, plus source connectivity and authentication, automated tests, and deployment with monitoring and audit logging.
     - summary: imperative, at most 80 characters, e.g. "Implement get_nostro_balances tool".
-    - description: "### Context" with one sentence "As an agent developer, I want …, so that …", then "### Acceptance criteria" with 2 to 4 "- [ ] …" items.
+    - description: "### Context" with one sentence "As an agent developer, I want …, so that …", then "### Acceptance criteria" with 2 to 4 "- [ ] Given …, When …, Then …" items.
     - story_points: 1, 2, 3, 5 or 8, in line with the estimate.
     - labels: ["mcp"] plus one functional label.
     Every story has project_key "{{ jira_project }}", issue_type "Story" and parent_key "{{ vars.epic.key }}". Return ONLY:
@@ -542,9 +542,9 @@ BACKLOG_PROMPT = _t("""
     [[FEEDBACK]]
 """)
 
-# system prompt: test_designer (its headings: scope, test cases table, coverage, entry & exit criteria)
+# system prompt: test_designer (its headings: scope, UAT test-case table, Gherkin scenarios, coverage, entry & exit criteria)
 TEST_PLAN_PROMPT = _t("""
-    Design the test set of MCP server "{{ inputs.mcp_name }}".
+    Design the UAT test plan and the Gherkin acceptance scenarios of MCP server "{{ inputs.mcp_name }}".
 
     Tools:[[TOOLS]]
     Acceptance criteria:
@@ -552,13 +552,14 @@ TEST_PLAN_PROMPT = _t("""
     Data: {{ vars.spec.data_classification or "classification not set" }}{% if vars.spec.contains_pii %}, returns personal data{% endif %} · authentication: {{ vars.spec.auth_model or "not set" }}
     Non-functional requirements: {{ vars.spec.nfr or "(not specified: name it as a gap)" }}
 
-    The test cases must include:
-    - functional: a nominal and an edge case for every tool;
-    - negative: missing or invalid arguments, unknown ids, source system unavailable (the tool returns an isError result with an actionable message, never a stack trace);
+    Test cases table (ID | Scenario | Steps | Expected result | Priority | Type) must include:
+    - functional: the nominal case of every tool, and its result checked against the source system;
+    - edge: missing or invalid arguments, unknown ids, empty results, source system unavailable (the tool returns an isError result with an actionable message, never a stack trace);
     - security: unauthenticated call refused, least privilege of the service account, injection attempts in string arguments{% if vars.spec.contains_pii %}, personal data masked for callers not entitled to it{% endif %};
-    - integration: tool names, JSON schemas and readOnly/destructive annotations match the specification;
+    - functional: tool names, JSON schemas and readOnly/destructive annotations match the specification;
     - performance: the latency and volume targets of the requirements.
-    Under Coverage, map every acceptance criterion to the IDs of the tests that prove it.
+    Acceptance scenarios: one ```gherkin block with one Feature per tool (or per acceptance-criteria group), a Background for the authenticated agent context, a nominal and an error Scenario each, and a Scenario Outline with Examples where only the input data varies.
+    Under Coverage, map every acceptance criterion to the test IDs and scenarios that prove it.
 """)
 
 # human_form AI draft
@@ -700,7 +701,7 @@ MCP_DELIVERY = {
         _stage("build", "Build & Test", "violet", [
             _step("test_plan", "Design the test sets", "ai_task", {
                 "prompt": TEST_PLAN_PROMPT, "system_prompt": "test_designer", "output": "markdown",
-                "artifact_title": "Test plan", "include_context": False,
+                "artifact_title": "Test plan & acceptance (Gherkin)", "include_context": False,
             }, store_as="test_plan"),
             _step("development", "Development", "wait_for", {
                 "operation_key": "jira.get_issue", "input": {"issue_key": "{{ vars.epic.key }}"},

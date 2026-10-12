@@ -147,6 +147,9 @@ export function IntakePane({ intakeId, onDecided }: { intakeId: string; onDecide
           <Button size="xs" variant="ai" icon={Sparkles} busy={busy === 'analyze'} onClick={() => void analyze()}>Analyze</Button>
         </div>
       )}
+      {s && item.ai_error && !item.ai_busy && (
+        <p className="text-xs text-rose-600 dark:text-rose-400">The last AI triage failed (the suggestion above is from an earlier run): {item.ai_error}</p>
+      )}
 
       {text && (
         <Section title="As detected">

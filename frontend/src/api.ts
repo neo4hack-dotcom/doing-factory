@@ -10,7 +10,7 @@ import type {
   Connector, CopilotReply, DemoInstallResult, Estimate, Event, Health, InboxCounts, InboxItem,
   IntakeItem, Kpis, LLMCall, LLMSettings, LinkKind, LlmModelInfo, LlmPreset, LlmTestResult,
   Notification, Operation, OperationResult, Priority, Project, ProjectStatus, ProjectSummary,
-  PromptDef, ReportAudience, RewriteStyle, RoleDef, Rule, Team, ToolCallResult, User,
+  ProjectDossier, PromptDef, ReportAudience, RewriteStyle, RoleDef, Rule, Team, ToolCallResult, User,
   ValidationReport, Watcher, WatcherRunResult,
 } from './types';
 
@@ -285,6 +285,8 @@ export const api = {
       put<Artifact>(`/projects/${enc(id)}/artifacts/${enc(artifactId)}`, { user_id, content }),
     addLink: (id: string, user_id: string, link: NewLinkBody) =>
       post<Project>(`/projects/${enc(id)}/links`, { ...link, user_id }),
+    /** Deterministic Markdown audit pack (no LLM): header, step log, artifacts, approvals, gates, audit chain. */
+    dossier: (id: string) => get<ProjectDossier>(`/projects/${enc(id)}/dossier`),
     report: (id: string, audience: ReportAudience) =>
       post<{ markdown: string }>(`/projects/${enc(id)}/report`, { audience }),
     explainRisk: (id: string) => post<{ markdown: string }>(`/projects/${enc(id)}/explain-risk`),

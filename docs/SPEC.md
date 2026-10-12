@@ -69,9 +69,11 @@ backend/
     engine/executors_flow.py  human_form, approval, estimation, fan_out, notify, wait_for activation/completion
     engine/executors_ai.py    ai_task, mcp_operation, agent_task, quality_gate + AI helpers (drafts, briefs, critic)
     engine/engine.py   WorkflowEngine (create/advance/complete/decide/confirm/retry/skip/reopen/cancel, recovery)
-    scheduler.py       periodic loop: watchers, wait_for polling, SLA checks, risk recompute, intake enrichment
+    scheduler.py       periodic loop: watchers, wait_for polling, SLA checks, risk recompute, intake enrichment, daily digest
     watchers.py        WatcherService.run(watcher) → intake items / auto-started projects
     notify.py          Notifier: in-app notifications + optional external channel Operation
+    digest.py          daily digest notification per user (deterministic, from the inbox + risk)
+    dossier.py         project dossier: deterministic Markdown audit pack (GET /projects/{id}/dossier)
     risk.py            deterministic risk score + reasons
     kpis.py            KPI computation
     inbox.py           derive inbox items for a user from projects + intake
@@ -422,13 +424,13 @@ Operations: `GET|POST /operations`, `PUT|DELETE /operations/{id}` · `POST /oper
 
 Blueprints: `GET|POST /blueprints`, `GET|PUT|DELETE /blueprints/{id}` · `POST /blueprints/{id}/duplicate` · `POST /blueprints/validate` (Blueprint) → `{ok, errors: [str], warnings: [str]}` · `POST /blueprints/generate` {description} → Blueprint (draft, unsaved)
 
-Projects: `GET /projects?status=&blueprint_id=&q=&parent_id=&user_id=` → ProjectSummary[] · `POST /projects` {blueprint_id, title, description, inputs, priority, sponsor_id, owner_id, team_id, tags, due_date, created_by} → Project · `GET /projects/{id}` → Project · `PATCH /projects/{id}` {title?, description?, priority?, sponsor_id?, owner_id?, team_id?, tags?, due_date?, stakeholder_ids?, user_id} · `POST /projects/{id}/cancel` {user_id, reason} · `DELETE /projects/{id}` · `GET /projects/{id}/events` → Event[] · `POST /projects/{id}/comments` {user_id, text} → Event · `PUT /projects/{id}/artifacts/{artifact_id}` {user_id, content} → Artifact · `POST /projects/{id}/links` {kind,label,url,external_id} · `POST /projects/{id}/report` {audience: 'sponsor'|'team'|'executive'} → `{markdown}` · `POST /projects/{id}/explain-risk` → `{markdown}` · `POST /projects/{id}/summarize` → `{summary}`
+Projects: `GET /projects?status=&blueprint_id=&q=&parent_id=&user_id=` → ProjectSummary[] · `POST /projects` {blueprint_id, title, description, inputs, priority, sponsor_id, owner_id, team_id, tags, due_date, created_by} → Project · `GET /projects/{id}` → Project · `PATCH /projects/{id}` {title?, description?, priority?, sponsor_id?, owner_id?, team_id?, tags?, due_date?, stakeholder_ids?, user_id} · `POST /projects/{id}/cancel` {user_id, reason} · `DELETE /projects/{id}` · `GET /projects/{id}/events` → Event[] · `POST /projects/{id}/comments` {user_id, text} → Event · `PUT /projects/{id}/artifacts/{artifact_id}` {user_id, content} → Artifact · `POST /projects/{id}/links` {kind,label,url,external_id} · `GET /projects/{id}/dossier` → `{filename, markdown}` (deterministic audit pack, no LLM) · `POST /projects/{id}/report` {audience: 'sponsor'|'team'|'executive'} → `{markdown}` · `POST /projects/{id}/explain-risk` → `{markdown}` · `POST /projects/{id}/summarize` → `{summary}`
 
 Steps (`/projects/{id}/steps/{step_id}/…`, body always includes `user_id`): `start` · `save` {form} · `complete` {form?, output?} · `ai-draft` {instructions} (async; returns `{accepted:true}`; result via WS) · `decide` {decision, comment} · `estimate` {estimate} · `confirm` {approve, payload?} · `gate` {action:'override'|'rerun'|'send_back', comment, rule_ids?, goto_step?} · `retry` · `skip` {reason} · `reopen` {reason} · `reassign` {user_ids}. All return the updated Project.
 
 Inbox: `GET /inbox?user_id=` → InboxItem[] (sorted: overdue, priority, due, created) · `GET /inbox/counts?user_id=` → `{total, approvals, forms, reviews, failures, intake}`
 
-Intake: `GET /intake?status=` · `POST /intake/{id}/accept` {user_id, blueprint_id?, title?, priority?, sponsor_id?, team_id?, owner_id?} → Project · `POST /intake/{id}/dismiss` {user_id, reason} · `POST /intake/{id}/analyze` → IntakeItem
+Intake: `GET /intake?status=` · `POST /intake/{id}/accept` {user_id, blueprint_id?, title?, priority?, sponsor_id?, team_id?, owner_id?} → Project · `POST /intake/{id}/dismiss` {user_id, reason} · `POST /intake/{id}/analyze` → IntakeItem (an AI failure — no LLM configured, model error — is recorded on the item as `ai_error` and returned with 200; 404 unknown id, 409 not new / already analysing)
 
 Watchers: `GET|POST /watchers`, `PUT|DELETE /watchers/{id}` · `POST /watchers/{id}/run` → `{ok, total, new, error, items_preview}` · `POST /watchers/{id}/reset`
 
@@ -671,7 +673,8 @@ class Notifier:
 # app/watchers.py
 class WatcherService:
     async def run(self, watcher_id: str) -> dict          # {ok, total, new, error, items_preview}
-    async def analyze_intake(self, intake_id: str) -> dict
+    async def analyze_intake(self, intake_id: str, *, raise_on_failure: bool = True) -> dict   # failure → ai_error persisted
+    def release_llm_waits(self) -> int    # clears "no LLM configured" ai_errors once an LLM is configured
     async def accept_intake(self, intake_id: str, user_id: str, overrides: dict) -> dict   # → Project
     async def dismiss_intake(self, intake_id: str, user_id: str, reason: str) -> dict
     def due(self, now) -> list[dict]

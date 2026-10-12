@@ -8,7 +8,9 @@ Every `settings.scheduler.tick_s` seconds (when enabled in Settings), one tick d
 - risk refresh — every in-flight project, every RISK_EVERY;
 - intake enrichment — AI triage of new items without a suggestion, one at a time, only
   when an LLM is configured (a failed analysis is not retried automatically: its error is
-  on the item and the "Analyze" button retries it).
+  on the item and the "Analyze" button retries it);
+- daily digest — when enabled in Settings › Notifications, once per business day from the
+  start of business hours (app/digest.py; the sent days are kept in the store).
 
 A tick never waits for the work it dispatches: each job is a background task, so a slow
 MCP server or a long LLM call delays nothing else. Jobs are isolated — an exception is
@@ -23,6 +25,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from app import digest
 from app.errors import FactoryError
 from app.util import parse_iso, to_iso, truncate
 
@@ -115,7 +118,7 @@ class Scheduler:
         started: list[asyncio.Task] = []
         for job, dispatch in (("watchers", self._dispatch_watchers), ("wait_for", self._dispatch_polls),
                               ("sla", self._dispatch_sla), ("risk", self._dispatch_risk),
-                              ("intake", self._dispatch_enrichment)):
+                              ("intake", self._dispatch_enrichment), ("digest", self._dispatch_digest)):
             try:
                 started.extend(dispatch(now))
             except Exception as exc:  # noqa: BLE001
@@ -218,6 +221,12 @@ class Scheduler:
             await self.c.watchers.analyze_intake(intake_id)
         except FactoryError as exc:   # stored on the item as ai_error: visible where it matters
             log.info("Intake %s: AI triage failed — %s", intake_id, exc.message)
+
+    def _dispatch_digest(self, now: datetime) -> list[asyncio.Task]:
+        if digest.due_day(self.c, now) is None:   # cheap: settings + clock, no store scan
+            return []
+        task = self._spawn("digest", "digest", lambda: digest.send_due_digests(self.c, now))
+        return [task] if task else []
 
     # ------------------------------------------------------------------ plumbing
     def _in_flight(self) -> list[dict]:

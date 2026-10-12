@@ -66,7 +66,9 @@ may be an inline closure. Events are batched once per frame; after a reconnect t
 bootstrap + counts (events sent while offline are lost). Counts refresh on `project.updated`,
 `project.deleted`, `notification`, `intake.updated`.
 
-**`router.ts`** — `useRoute() → {name, params, query, path}`; `navigate(path, {replace?})`;
+**`router.ts`** — `useRoute() → {name, params, query, path}`; `navigate(path, {replace?, force?})`
+(consults leave guards; `force` skips them after an explicit confirm or a save); `useUnsavedChangesGuard(dirty, message?)`
+(asks before tab close, link clicks and navigate() while dirty), `registerNavigationGuard(fn) → unregister`;
 `<Link to="/projects/x" …anchorProps>` (modified clicks open new tabs); `href(path)`;
 `isActivePath(current, path)`; `paths.home() | inbox(itemId?) | projects(query?) | newProject(bpId?) |
 project(id, stepId?) | floor() | intake() | kpis() | blueprints() | blueprint(id) | operations() |
