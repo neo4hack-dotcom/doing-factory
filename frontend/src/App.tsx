@@ -33,6 +33,7 @@ const Operations = lazy(() => import('./views/studio/Operations'));
 const Prompts = lazy(() => import('./views/studio/Prompts'));
 const Rules = lazy(() => import('./views/studio/Rules'));
 const Settings = lazy(() => import('./views/settings/Settings'));
+const Guide = lazy(() => import('./views/Guide'));
 
 /** Routes whose view uses the full width (live boards, designers) instead of the reading column. */
 const WIDE_ROUTES = new Set<Route['name']>(['floor', 'blueprint']);
@@ -66,6 +67,7 @@ function renderRoute(route: Route): ReactNode {
     case 'prompts': return <Prompts />;
     case 'rules': return <Rules />;
     case 'settings': return <Settings tab={isSettingsTab(p.tab) ? p.tab : 'ai'} />;
+    case 'guide': return <Guide section={p.section} />;
     default: return <NotFound />;
   }
 }

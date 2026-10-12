@@ -158,7 +158,7 @@ describe('router', () => {
     assert.deepEqual(SETTINGS_NAV.map((s) => s.key), SETTINGS_TABS.map((t) => t.key));
     for (const item of NAV_ITEMS) assert.notEqual(parseRoute(`#${item.path}`).name, 'not-found', item.path);
     const shortcuts = NAV_ITEMS.map((n) => n.shortcut).filter(Boolean);
-    assert.deepEqual([...shortcuts].sort(), ['f', 'h', 'i', 'k', 'p', 's']);
+    assert.deepEqual([...shortcuts].sort(), ['f', 'h', 'i', 'k', 'p', 's', 'u']);
   });
 });
 

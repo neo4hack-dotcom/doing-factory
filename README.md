@@ -38,6 +38,7 @@ The contract for every contributor is [`docs/SPEC.md`](docs/SPEC.md). The UI is 
 | **Studio** | Visual **Blueprint designer** (10 step types, type-specific forms, variable helper, validation, *Generate with AI*), **Operations** (MCP bindings: direct / LLM-built / agent, with *Try it*), **Prompt library**, **Compliance rules** |
 | **Settings** | AI model (presets, model picker, live test), MCP connectors + tool bench, watchers (schedules, mappings), people / teams / roles, notifications (+ **daily digest** on business days), engine autonomy & scheduler, hours-saved baselines, tamper-evident audit log, backup / import, demo environment |
 | **Copilot** | "Ask the Factory" chat over the whole portfolio, read-only tools, answers cite projects as clickable chips |
+| **User Guide** | In-app guide (menu *User Guide*, the **?** icon in the header, or `g u`): every screen, the 10 step types, configuration, an end-to-end walkthrough, shortcuts and troubleshooting — searchable, with links into the app |
 | **Factory MCP** | The Factory itself is an MCP server at `/mcp` (projects, approvals, KPIs) for other agents |
 
 **Step types:** AI task · human form (AI pre-filled) · approval (all / any / quorum, reject → rework) ·
