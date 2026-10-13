@@ -1,6 +1,6 @@
 // "Acting as": there is no sign-in by default, so every mutation carries the persona's user_id and
 // the backend checks it. Switching persona instantly shows that person's inbox — the fastest way to
-// demo (or test) a multi-party approval.
+// walk through (or test) a multi-party approval.
 import { Check, ChevronsUpDown, Search, UserPlus } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import { cls } from '../lib/cls';
@@ -80,7 +80,7 @@ export function PersonaSwitcher({ compact }: { compact?: boolean }) {
         )}
         {users.length === 0 ? (
           <div className="space-y-3 p-4 text-center">
-            <p className="text-sm text-muted">No people yet. Add them in Settings, or install the Sandbox demo for a ready-made cast.</p>
+            <p className="text-sm text-muted">No people yet. Import them from your DOINg.AI or add them in Settings.</p>
             <Button size="sm" variant="outline" icon={UserPlus} onClick={() => {
               setOpen(false);
               navigate(paths.settings('people'));

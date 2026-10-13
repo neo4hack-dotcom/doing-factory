@@ -31,7 +31,6 @@ const KIND_OPTIONS = [
   { value: 'settings.updated', label: 'Settings & configuration' },
   { value: 'connector.tested', label: 'Connector tests' },
   { value: 'blueprint.saved', label: 'Blueprints' },
-  { value: 'demo.installed', label: 'Demo' },
 ];
 
 const SYSTEM_ACTORS = [
@@ -45,7 +44,7 @@ function kindTone(kind: string): Tone {
   if (kind.startsWith('approval.') || kind.endsWith('.completed') || kind === 'gate.passed') return 'emerald';
   if (kind.startsWith('gate.')) return 'amber';
   if (kind.startsWith('agent.') || kind.startsWith('operation.')) return 'violet';
-  if (kind.startsWith('settings.') || kind.startsWith('connector.') || kind.startsWith('blueprint.') || kind.startsWith('demo.')) return 'zinc';
+  if (kind.startsWith('settings.') || kind.startsWith('connector.') || kind.startsWith('blueprint.')) return 'zinc';
   if (kind.startsWith('intake.') || kind.startsWith('watcher.')) return 'cyan';
   if (kind.startsWith('step.')) return 'sky';
   return 'brand';

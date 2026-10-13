@@ -12,6 +12,7 @@ import { cls } from '../../lib/cls';
 import { plural } from '../../lib/format';
 import { useApp } from '../../lib/store';
 import type { RoleDef, Team, Tone, User } from '../../types';
+import { connectorOfKind, ImportPeopleButton } from './connectorSetup';
 import { ChipSelect, Note } from './shared';
 
 type PeopleView = 'users' | 'teams' | 'roles';
@@ -48,7 +49,8 @@ export function RoleChip({ roleKey }: { roleKey: string }) {
 // ---- Users -------------------------------------------------------------------------------------
 
 function UsersPanel() {
-  const { users, teamById, reload, userId } = useApp();
+  const { users, teamById, reload, userId, connectors } = useApp();
+  const portfolio = connectorOfKind(connectors, 'portfolio');
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<User | 'new' | null>(null);
   const [busy, run] = useBusy();
@@ -85,11 +87,21 @@ function UsersPanel() {
     <>
       <div className="flex flex-wrap items-center gap-3">
         <Input icon={Search} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people, e-mails, roles…" className="max-w-xs" />
-        <Button icon={UserPlus} className="ml-auto" onClick={() => setEditing('new')}>Add person</Button>
+        <div className="ml-auto flex flex-wrap gap-2">
+          {portfolio && <ImportPeopleButton connector={portfolio} />}
+          <Button icon={UserPlus} onClick={() => setEditing('new')}>Add person</Button>
+        </div>
       </div>
       {users.length === 0 ? (
-        <EmptyState icon={Contact} title="Nobody here yet" description="Add sponsors, product managers, developers, IT, security and compliance — or install the Sandbox demo team."
-          action={<Button icon={UserPlus} onClick={() => setEditing('new')}>Add person</Button>} />
+        <EmptyState icon={Contact} title="Nobody here yet" description={portfolio
+            ? `Import the sponsors and project managers ${portfolio.name} knows, then add developers, IT, security and compliance.`
+            : 'Add sponsors, product managers, developers, IT, security and compliance — or connect your DOINg.AI to import its people.'}
+          action={(
+            <div className="flex flex-wrap justify-center gap-2">
+              {portfolio && <ImportPeopleButton connector={portfolio} variant="primary" />}
+              <Button icon={UserPlus} variant={portfolio ? 'outline' : 'primary'} onClick={() => setEditing('new')}>Add person</Button>
+            </div>
+          )} />
       ) : (
         <Card padding="none" className="overflow-x-auto">
           <table className="w-full min-w-[720px] text-left text-sm">

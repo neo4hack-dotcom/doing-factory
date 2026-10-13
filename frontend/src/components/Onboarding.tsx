@@ -1,12 +1,14 @@
 // First-run wizard: 1) AI model (detects a local Ollama, recommends tool-capable local models, tests
-// and saves), 2) Connect (Sandbox demo or your own MCP servers), 3) Who are you (persona) with the
-// end-to-end CTA "Simulate a new use case". Every step reflects the real backend state, and the
-// whole thing is skippable. Contract: <Onboarding open onClose />.
+// and saves), 2) Connect your systems (DOINg.AI and Jira from their templates, each tested live,
+// then their standard operations, then people imported from DOINg.AI), 3) Who are you (persona).
+// Every item reflects the real backend state, and the whole thing is skippable.
+// Contract: <Onboarding open onClose />.
 //
 // The shell shows it while no LLM is configured, so saving step 1 flips `open` to false; the wizard
 // latches open until the person closes it, otherwise it would vanish mid-flow.
 import {
-  ArrowLeft, ArrowRight, Bot, CheckCircle2, FlaskConical, House, Plug, Radar, Rocket, Search, Sparkles, UserRound, XCircle, Zap,
+  ArrowLeft, ArrowRight, Bot, Briefcase, CheckCircle2, Circle, House, ListChecks, ListPlus, Plug, RefreshCw, Rocket, Search,
+  UserPlus, UserRound, XCircle, Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -15,9 +17,13 @@ import { cls } from '../lib/cls';
 import { plural } from '../lib/format';
 import { navigate, paths } from '../lib/router';
 import { useApp } from '../lib/store';
-import type { LLMProviderKind, LlmPreset, LlmTestResult } from '../types';
-import { DEMO_CONTENTS, installDemo, simulateUseCase } from '../views/settings/demo';
-import type { DemoInstall, SimulationOutcome } from '../views/settings/demo';
+import type {
+  Connector, ConnectorTemplate, LLMProviderKind, LlmPreset, LlmTestResult, PeopleImportResult, StandardSetupResult,
+} from '../types';
+import {
+  connectorOfKind, ImportPeopleButton, peopleImportSummary, StandardSetupReport, standardSetupSummary, TemplateConnectForm,
+  TemplatesLoading, useConnectorTemplates,
+} from '../views/settings/connectorSetup';
 import { isRecommended, matchPreset, ModelList, PresetCards, TestResultView, useModelList, usePresets } from '../views/settings/llmParts';
 import { Avatar, Badge, Button, Field, Input, Modal, Spinner, TONE, toneOf, useBusy, useToast } from './ui';
 
@@ -43,7 +49,7 @@ function Wizard({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(() => (!onboarding?.llm_configured ? 0 : !onboarding.has_connectors ? 1 : 2));
   const steps: StepMeta[] = [
     { title: 'AI model', icon: Bot, done: !!onboarding?.llm_configured },
-    { title: 'Connect', icon: Plug, done: !!onboarding?.has_connectors || connectors.length > 0 },
+    { title: 'Connect your systems', icon: Plug, done: !!onboarding?.has_connectors || connectors.length > 0 },
     { title: 'Who are you', icon: UserRound, done: !!userId },
   ];
   const last = step === steps.length - 1;
@@ -92,7 +98,7 @@ function Wizard({ onClose }: { onClose: () => void }) {
       </ol>
       <div key={step} className="animate-fade-in">
         {step === 0 && <AiStep onDone={() => setStep(1)} />}
-        {step === 1 && <ConnectStep onClose={onClose} onDone={() => setStep(2)} />}
+        {step === 1 && <ConnectStep onClose={onClose} />}
         {step === 2 && <PersonaStep onClose={onClose} />}
       </div>
     </Modal>
@@ -187,70 +193,146 @@ function AiStep({ onDone }: { onDone: () => void }) {
   );
 }
 
-// ---- 2. Connect --------------------------------------------------------------------------------
+// ---- 2. Connect your systems -------------------------------------------------------------------
 
-function ConnectStep({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const { onboarding, connectors, reload } = useApp();
-  const toast = useToast();
-  const [busy, run] = useBusy();
-  const [result, setResult] = useState<DemoInstall | null>(null);
-  const installed = !!onboarding?.demo_installed;
-
-  const install = () => run('demo', async () => {
-    const res = await installDemo();
-    setResult(res);
-    await reload();
-    const failing = (res.connectors ?? []).filter((c) => !c.ok);
-    if (failing.length) toast.warn(`Sandbox installed, but ${failing.map((c) => c.name).join(', ')} did not answer its test.`);
-    else toast.success('Sandbox installed and connected.');
-  });
+function ConnectStep({ onClose }: { onClose: () => void }) {
+  const { connectors } = useApp();
+  const { templates, error, reload } = useConnectorTemplates();
+  const byId = (id: string) => templates?.find((t) => t.id === id) ?? null;
+  const others = connectors.filter((c) => c.kind !== 'portfolio' && c.kind !== 'jira').length;
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted">The Factory talks to your tools through <b>MCP servers</b>: the DOINg.AI portfolio (new use cases), Jira, notification channels…</p>
-      <div className="grid gap-3 md:grid-cols-2">
-        <div className={cls('flex flex-col rounded-xl border p-4', installed ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-violet-500/40 bg-violet-500/[0.03]')}>
-          <div className="flex items-center gap-2">
-            <FlaskConical size={18} className="text-violet-500" />
-            <span className="text-sm font-bold">Install the demo environment</span>
-            {installed && <CheckCircle2 size={16} className="ml-auto text-emerald-500" />}
-          </div>
-          <p className="mt-1 text-xs text-muted">Bundled, clearly labelled <Badge tone="violet" size="xs">Sandbox</Badge> — fictional data, nothing leaves this machine:</p>
-          <ul className="mt-2 flex-1 space-y-1">
-            {DEMO_CONTENTS.map((l) => <li key={l} className="flex gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400"><span className="text-brand-500">•</span>{l}</li>)}
-          </ul>
-          {result?.connectors && (
-            <ul className="mt-2 space-y-0.5">
-              {result.connectors.map((c) => (
-                <li key={c.id} className="flex items-center gap-1.5 text-[11px]">
-                  {c.ok ? <CheckCircle2 size={12} className="text-emerald-500" /> : <XCircle size={12} className="text-rose-500" />}
-                  <span className="font-medium">{c.name}</span>
-                  <span className="truncate text-muted">{c.ok ? plural(c.tool_count, 'tool') : c.error}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="mt-3 flex gap-2">
-            {installed
-              ? <Button size="sm" iconRight={ArrowRight} onClick={onDone}>Continue</Button>
-              : <Button size="sm" icon={FlaskConical} busy={busy === 'demo'} onClick={() => void install()}>Install demo</Button>}
-          </div>
-        </div>
+      <p className="text-sm text-muted">
+        The Factory talks to your systems through <b>MCP servers</b>. Connect your <b>DOINg.AI</b> (where sponsors register use cases)
+        and your <b>Jira</b>; each connection is tested live, then the standard operations are created for you.
+      </p>
+      {!templates ? <TemplatesLoading error={error} onRetry={() => void reload()} /> : (
+        <>
+          <SystemCard
+            kind="portfolio"
+            title="DOINg.AI"
+            blurb="Your use-case portfolio — its URL, plus a token if your instance needs one."
+            template={byId('doing_ai')}
+            initiallyOpen
+            onClose={onClose}
+          />
+          <SystemCard
+            kind="jira"
+            title="Jira"
+            blurb="Through mcp-atlassian: your site URL, your e-mail and an API token."
+            template={byId('jira')}
+            onClose={onClose}
+          />
+        </>
+      )}
+      <p className="text-xs text-muted">
+        Teams, e-mail, git or any other MCP server{others > 0 && <> (you have {plural(others, 'other connector')})</>}:{' '}
+        <button type="button" className="font-semibold text-brand-600 hover:underline dark:text-brand-400" onClick={() => { onClose(); navigate(paths.settings('connectors')); }}>
+          Settings › Connectors
+        </button>.
+      </p>
+    </div>
+  );
+}
 
-        <div className="flex flex-col rounded-xl border p-4 hairline">
-          <div className="flex items-center gap-2">
-            <Plug size={18} className="text-brand-500" />
-            <span className="text-sm font-bold">Connect my own MCP servers</span>
-          </div>
-          <p className="mt-1 flex-1 text-xs text-muted">
-            Add your DOINg.AI, Jira (e.g. mcp-atlassian), e-mail or Teams servers over stdio, HTTP or SSE, test them and browse their tools.
-            {connectors.length > 0 && <> You already have <b>{plural(connectors.length, 'connector')}</b>.</>}
-          </p>
-          <div className="mt-3">
-            <Button size="sm" variant="outline" icon={Plug} onClick={() => { onClose(); navigate(paths.settings('connectors')); }}>Open Connectors</Button>
-          </div>
-        </div>
+/** One system of step 2: connect it from its template, then its standard operations (and people). */
+function SystemCard({ kind, title, blurb, template, initiallyOpen = false, onClose }: {
+  kind: 'portfolio' | 'jira';
+  title: string;
+  blurb: string;
+  template: ConnectorTemplate | null;
+  initiallyOpen?: boolean;
+  onClose: () => void;
+}) {
+  const { connectors, operations, reload } = useApp();
+  const toast = useToast();
+  const [busy, run] = useBusy();
+  const [expanded, setExpanded] = useState(initiallyOpen);
+  const [report, setReport] = useState<StandardSetupResult | null>(null);
+  const connector = connectorOfKind(connectors, kind);
+  const opCount = connector ? operations.filter((o) => o.connector_id === connector.id).length : 0;
+  const ok = connector?.status.ok === true;
+
+  const setup = (c: Connector) => run('std', async () => {
+    const res = await api.connectors.standardSetup(c.id);
+    setReport(res);
+    await reload();
+    toast.success(`${c.name}: ${standardSetupSummary(res)}`);
+  });
+  const retest = (c: Connector) => run('test', async () => {
+    const saved = await api.connectors.test(c.id);
+    await reload();
+    if (saved.status.ok) toast.success(`${saved.name}: ${plural(saved.status.tool_count, 'tool')}.`);
+    else toast.error(`${saved.name}: ${saved.status.error || 'the server did not answer.'}`);
+  });
+
+  const Icon = kind === 'portfolio' ? Briefcase : ListChecks;
+  return (
+    <div className={cls('rounded-xl border p-4', ok ? 'border-emerald-500/40 bg-emerald-500/[0.04]' : 'hairline')}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Icon size={18} className="text-brand-500" />
+        <span className="text-sm font-bold">{title}</span>
+        {connector ? (
+          ok
+            ? <Badge tone="emerald" size="xs" icon={CheckCircle2}>Connected · {plural(connector.status.tool_count || connector.tools.length, 'tool')}</Badge>
+            : connector.status.ok === false
+              ? <Badge tone="rose" size="xs" icon={XCircle}>Failing</Badge>
+              : <Badge tone="zinc" size="xs">Not tested</Badge>
+        ) : <Badge tone="zinc" size="xs">Not connected</Badge>}
+        {!connector && !expanded && (
+          <Button size="xs" variant="outline" icon={Plug} className="ml-auto" disabled={!template} onClick={() => setExpanded(true)}>Connect</Button>
+        )}
       </div>
+      <p className="mt-1 text-xs text-muted">{connector ? connector.description || blurb : blurb}</p>
+
+      {!connector && expanded && (
+        <div className="mt-3">
+          {template
+            ? <TemplateConnectForm template={template} showName={false} onConnected={(c) => setup(c)} />
+            : <p className="text-xs text-muted">This server offers no {title} template — add it from Settings › Connectors.</p>}
+        </div>
+      )}
+
+      {connector && (
+        <div className="mt-3 space-y-3">
+          {connector.status.ok === false && connector.status.error && (
+            <p className="rounded-lg bg-rose-50 px-2.5 py-1.5 font-mono text-[11px] text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{connector.status.error}</p>
+          )}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="flex items-center gap-1.5">
+              {opCount > 0 ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Circle size={14} className="text-zinc-400" />}
+              {opCount > 0 ? plural(opCount, 'operation') : 'No operation yet'}
+            </span>
+            <Button size="xs" variant={opCount ? 'ghost' : 'primary'} icon={ListPlus} busy={busy === 'std'} disabled={!ok} onClick={() => void setup(connector)}>
+              {opCount ? 'Re-run standard setup' : 'Create standard operations'}
+            </Button>
+            {!ok && <Button size="xs" variant="outline" icon={RefreshCw} busy={busy === 'test'} onClick={() => void retest(connector)}>Test again</Button>}
+            {!ok && (
+              <button type="button" className="text-xs font-semibold text-brand-600 hover:underline dark:text-brand-400" onClick={() => { onClose(); navigate(paths.settings('connectors')); }}>
+                Edit in Settings
+              </button>
+            )}
+          </div>
+          {report && <StandardSetupReport result={report} />}
+          {kind === 'portfolio' && ok && <PeopleRow connector={connector} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PeopleRow({ connector }: { connector: Connector }) {
+  const { users } = useApp();
+  const [last, setLast] = useState<PeopleImportResult | null>(null);
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t pt-3 text-xs hairline">
+      <span className="flex items-center gap-1.5">
+        {users.length > 0 ? <CheckCircle2 size={14} className="text-emerald-500" /> : <Circle size={14} className="text-zinc-400" />}
+        {users.length > 0 ? `${plural(users.length, 'person', 'people')} in the Factory` : 'No people yet'}
+      </span>
+      <ImportPeopleButton connector={connector} size="xs" variant={users.length ? 'ghost' : 'primary'} onDone={setLast} />
+      {last && <span className="text-muted">{peopleImportSummary(last)}</span>}
     </div>
   );
 }
@@ -258,23 +340,21 @@ function ConnectStep({ onClose, onDone }: { onClose: () => void; onDone: () => v
 // ---- 3. Who are you ----------------------------------------------------------------------------
 
 function PersonaStep({ onClose }: { onClose: () => void }) {
-  const { users, userId, setUserId, roleByKey, onboarding, settings } = useApp();
-  const [busy, run] = useBusy();
-  const [sim, setSim] = useState<SimulationOutcome | null>(null);
+  const { users, userId, setUserId, roleByKey, connectors } = useApp();
   const active = useMemo(() => users.filter((u) => u.active), [users]);
-  const canSimulate = !!onboarding?.demo_installed && !!settings?.llm.base_url && !!settings.llm.model;
-
-  const simulate = () => run('sim', async () => {
-    setSim(await simulateUseCase());
-  });
+  const portfolio = connectorOfKind(connectors, 'portfolio');
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted">Pick who you act as. The persona decides your inbox and who signs approvals — switch any time from the header (great for demos).</p>
+      <p className="text-sm text-muted">Pick who you act as. The persona decides your inbox and who signs approvals — switch any time from the header.</p>
       {active.length === 0 ? (
-        <p className="rounded-lg border border-dashed px-3 py-4 text-center text-xs text-muted hairline">
-          Nobody yet — install the demo (previous step) or add people in Settings › People & Teams.
-        </p>
+        <div className="space-y-3 rounded-lg border border-dashed px-3 py-4 text-center text-xs text-muted hairline">
+          <p>Nobody yet — import the people your DOINg.AI knows, or add them with their roles.</p>
+          <div className="flex flex-wrap justify-center gap-2">
+            {portfolio && portfolio.status.ok && <ImportPeopleButton connector={portfolio} variant="primary" />}
+            <Button size="sm" variant="outline" icon={UserPlus} onClick={() => { onClose(); navigate(paths.settings('people')); }}>Add people</Button>
+          </div>
+        </div>
       ) : (
         <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2" role="radiogroup" aria-label="Persona">
           {active.map((u) => {
@@ -301,32 +381,6 @@ function PersonaStep({ onClose }: { onClose: () => void }) {
               </button>
             );
           })}
-        </div>
-      )}
-
-      {canSimulate && (
-        <div className="rounded-xl border border-violet-500/30 bg-violet-500/[0.04] p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <Sparkles size={18} className="text-violet-500" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold">See the factory run end to end</p>
-              <p className="text-xs text-muted">The AI plays a sponsor creating a new use case in the sandbox DOINg.AI; the watcher detects it into Intake.</p>
-            </div>
-            <Button variant="ai" icon={Sparkles} busy={busy === 'sim'} onClick={() => void simulate()}>Simulate a new use case</Button>
-          </div>
-          {busy === 'sim' && <p className="mt-2 text-xs text-muted">The local model is writing the use case — this can take a minute…</p>}
-          {sim && (
-            <div className="mt-3 rounded-lg border bg-white p-3 animate-slide-up hairline dark:bg-ink-900">
-              <p className="text-sm font-semibold">{sim.name}</p>
-              {sim.description && <p className="mt-0.5 line-clamp-3 text-xs text-muted">{sim.description}</p>}
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {sim.detected
-                  ? <Badge tone="emerald" icon={Radar}>{plural(sim.detected, 'new item')} in Intake</Badge>
-                  : <Badge tone="amber">{sim.watcherError || 'Created — the watcher will detect it at its next run'}</Badge>}
-                <Button size="xs" iconRight={ArrowRight} onClick={() => { onClose(); navigate(paths.intake()); }}>Open Intake</Button>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

@@ -10,7 +10,7 @@ PMs, developers, IT, security and compliance — using a **local LLM** (Ollama o
 server) for orchestration, drafting, rewording, Jira writing, estimation hints, test design, compliance
 QA and agentic steps over MCP tools.
 
-Reference example (must work end to end with the bundled sandbox):
+Reference example (runs end to end against the real DOINg.AI and Jira, connected as in §13):
 1. A sponsor creates a use case in DOINg.AI → a **Watcher** polling the DOINg.AI MCP detects it.
 2. The Factory creates a **Project** from the "Use Case Onboarding" blueprint.
 3. An agent analyses dependencies, finds the use case needs 5 MCP servers, checks the DOINg.AI MCP
@@ -35,7 +35,7 @@ Reference example (must work end to end with the bundled sandbox):
 | Backend deps | `fastapi`, `uvicorn[standard]`, `pydantic>=2.9`, `pydantic-settings`, `httpx`, `jinja2`, `pytest` (dev). **No MCP SDK**: the MCP client is the hand-written JSON-RPC 2.0 client ported from the user's AGENT project (`agent/backend/app/mcp/protocol.py` + `registry.py`, protocol `2025-06-18`, stdio + streamable HTTP + SSE), the bundled MCP servers use the stdlib helper ported from `agent/mcp_servers/_mcp_stdio.py`, and the Factory's own `/mcp` endpoint is a small JSON-RPC handler. |
 | Frontend | React 19 + TypeScript (strict) + Vite 6 + Tailwind 3.4 (class dark mode) + `lucide-react`. No router lib (tiny hash router in `lib/router.ts`), no state lib (React Context). No chart lib (hand-rolled SVG). No markdown lib (ported safe renderer). |
 | Persistence | SQLite document store `backend/data/factory.db` (WAL) — see §2 |
-| Philosophy | **Starts clean, degrades honestly.** App boots with nothing configured. Anything that needs the LLM or an MCP connector fails *at use time* with an actionable message (e.g. "No LLM configured — open Settings › AI Model"). Never fabricate an LLM answer or a tool result. Sandbox connectors exist but are clearly labelled **Sandbox** and only installed on explicit request. |
+| Philosophy | **Starts clean, degrades honestly.** App boots with nothing configured. Anything that needs the LLM or an MCP connector fails *at use time* with an actionable message (e.g. "No LLM configured — open Settings › AI Model"). Never fabricate an LLM answer or a tool result. **Real only**: the app ships no demo data, no sandbox server and no simulated use case — every connector points at a real system. |
 | IDs | `uuid4().hex[:12]` prefixed: `usr_`, `team_`, `con_`, `op_`, `bp_`, `prj_`, `wat_`, `int_`, `ntf_`, `evt_`, `rule_`, `art_`, `lnk_`, `chat_` |
 | Timestamps | ISO-8601 UTC strings (`2026-10-11T14:03:00Z`) everywhere in JSON |
 | Field naming | snake_case in Python **and** TypeScript (types.ts mirrors models.py verbatim) |
@@ -80,15 +80,15 @@ backend/
     copilot.py         "Ask the Factory" chat with internal read-only tools
     factory_mcp.py     the Factory exposed as an MCP server (streamable HTTP at /mcp)
     seed/defaults.py   default roles, prompts, compliance rules, blueprints (templates, always seeded if missing)
-    seed/demo.py       demo installer: users, teams, sandbox connectors, operations, watchers
+    seed/standard_ops.py  standard setup of a DOINg.AI / Jira connector: the operations the builtin blueprints call + the new-use-case watcher (§13)
+    mcp/templates.py   connector templates (DOINg.AI, Jira via mcp-atlassian, remote HTTP MCP) and their validation (§13)
     api/routes_*.py    one router per concern (system, settings, people, connectors, operations, blueprints, projects, inbox, intake, watchers, library, ai, admin)
     api/ws.py          WebSocket /api/ws
   mcp_servers/
     _mcp_stdio.py      stdlib MCP stdio server helper (ported from agent/mcp_servers/_mcp_stdio.py)
-    doing_ai_mcp.py    "DOINg.AI Portfolio" MCP server — mode `sandbox` (local JSON state, seeded) or `bridge` (env DOING_AI_URL → reads the real DOINg.AI `GET /api/data`, read-only)
-    jira_mcp.py        "Jira (Sandbox)" MCP server — tool names mirror sooperset/mcp-atlassian
-  data/                runtime (gitignored): factory.db, sandbox/*.json
-  tests/               pytest
+    doing_ai_mcp.py    the DOINg.AI MCP server — talks to the real DOINg.AI backend (env DOING_AI_URL): reads `GET /api/data`, writes `POST /api/data` (§13)
+  data/                runtime (gitignored): factory.db
+  tests/               pytest; tests/fixtures holds the test doubles (fake DOINg.AI backend, fake mcp-atlassian, test people/teams)
   requirements.txt
 ```
 
@@ -180,7 +180,7 @@ Connector: id, name, kind: 'portfolio'|'jira'|'notification'|'git'|'docs'|'other
            transport: 'stdio'|'http'|'sse' = 'http',
            command='', args: list[str]=[], env: dict[str,str]={}, cwd='',      # stdio
            url='', headers: dict[str,str]={},                                   # http/sse (header values masked on read)
-           enabled=True, timeout_s=60, sandbox=False,
+           enabled=True, timeout_s=60,
            status: ConnectorStatus, tools: list[ToolInfo]=[], created_at, updated_at
 FieldDef: key, label, type: 'text'|'textarea'|'markdown'|'number'|'select'|'multiselect'|'date'|'user'|'users'|'team'|'checkbox'|'list'|'url' = 'text',
           required=False, options: list[str]=[], help='', placeholder='', default: Any = None
@@ -290,7 +290,8 @@ ChatMessage: role: 'user'|'assistant', content, tool_calls: list[{name, args, su
 ## 4. Templating & context (engine/templating.py)
 
 Jinja2 `SandboxedEnvironment(undefined=ChainableUndefined, autoescape=False)` with filters `tojson`,
-`bullets` (list → "- a\n- b"), `truncate_chars(n)`, `slug`. Functions:
+`bullets` (list → "- a\n- b"), `truncate_chars(n)`, `slug`, `compact` (a dict without its empty entries —
+None/undefined/""/[]/{} — to build tool arguments where an absent optional field must not be sent). Functions:
 - `render(template: str, ctx) -> str`
 - `render_obj(obj, ctx)` — recursively renders strings in dicts/lists. A string that is *exactly* one
   expression `{{ expr }}` returns the native value (list/dict/number), not its string.
@@ -405,20 +406,20 @@ WS message = `{"type": str, ...payload}`:
 - `settings.updated` {}
 - `reference.updated` {collection: 'users'|'teams'|'roles'|'connectors'|'operations'|'blueprints'|'watchers'} — emitted by every mutation of reference data; the frontend store reloads bootstrap
 
-Activity `Event.kind`: `project.created, project.completed, project.cancelled, project.blocked, project.updated, stage.started, stage.completed, step.started, step.completed, step.skipped, step.failed, step.retried, step.reopened, step.assigned, approval.approved, approval.rejected, form.submitted, estimate.submitted, operation.executed, agent.tool_call, gate.passed, gate.failed, gate.overridden, artifact.updated, comment.added, link.added, watcher.run, intake.detected, intake.accepted, intake.dismissed, notification.sent, settings.updated, connector.tested, blueprint.saved, demo.installed`.
+Activity `Event.kind`: `project.created, project.completed, project.cancelled, project.blocked, project.updated, stage.started, stage.completed, step.started, step.completed, step.skipped, step.failed, step.retried, step.reopened, step.assigned, approval.approved, approval.rejected, form.submitted, estimate.submitted, operation.executed, agent.tool_call, gate.passed, gate.failed, gate.overridden, artifact.updated, comment.added, link.added, watcher.run, intake.detected, intake.accepted, intake.dismissed, notification.sent, settings.updated, connector.tested, blueprint.saved`.
 
 ---
 
 ## 9. REST API (all under `/api`; JSON; errors = HTTPException `{detail}`)
 
 System: `GET /health` → `{ok, version, llm: {configured, model, provider}, scheduler_running, counts:{projects_active, inbox?}}` ·
-`GET /bootstrap` → `{settings, roles, users, teams, blueprints (full), connectors, operations, onboarding: {llm_configured, has_connectors, has_users, demo_installed}}`
+`GET /bootstrap` → `{settings, roles, users, teams, blueprints (full), connectors, operations, onboarding: {llm_configured, has_connectors, has_users, has_portfolio, has_jira, has_standard_operations}}` — `has_portfolio` / `has_jira`: a connector of kind `portfolio` / `jira` exists; `has_standard_operations`: at least one of those kinds is connected and, for every one connected, all its standard operations (§13) exist by key
 
 Settings: `GET /settings` · `PUT /settings` (deep-merge partial; `api_key` '' or masked keeps stored) · `GET /llm/presets` → `[{id,label,provider,base_url}]` · `POST /llm/test` body optional partial LLMSettings → `{ok, latency_ms, model, reply, error}` · `GET /llm/models?provider=&base_url=` → `{models: [...], error}`
 
-People: `GET|POST /users`, `PUT|DELETE /users/{id}` · `GET|POST /teams`, `PUT|DELETE /teams/{id}` · `GET /roles`, `PUT /roles` (full list)
+People: `GET|POST /users`, `PUT|DELETE /users/{id}` · `GET|POST /teams`, `PUT|DELETE /teams/{id}` · `GET /roles`, `PUT /roles` (full list) · `POST /people/import-from-connector` {connector_id} → `{created: int, skipped: int, users: User[]}` (portfolio connector only, else 422; calls its `list_users` + `list_projects(include_archived)`; creates name, email, title; role `sponsor` for people referenced as a project's `sponsorId`, no other role; an e-mail already known (case-insensitive) or missing is skipped; connector failure → 502)
 
-Connectors: `GET|POST /connectors`, `GET|PUT|DELETE /connectors/{id}` · `POST /connectors/{id}/test` → Connector · `POST /connectors/{id}/call` {tool, args} → `{ok, data, content_text, is_error, latency_ms, error}`
+Connectors: `GET|POST /connectors`, `GET|PUT|DELETE /connectors/{id}` · `POST /connectors/{id}/test` → Connector · `POST /connectors/{id}/call` {tool, args} → `{ok, data, content_text, is_error, latency_ms, error}` · `GET /connectors/templates` → `[{id, name, kind, description, transport, command, args, env_template, fields: [{key, label, secret, required, placeholder, help}], docs_url}]` (ids `doing_ai`, `jira`, `http`, §13) · `POST /connectors/from-template` {template_id, name?, values: {field: value}, kind?} → Connector (validated — 422 naming the missing/inconsistent fields, nothing saved; stdio fields go to `env`, empty values are not set; `http`: `url` + `Authorization: Bearer <bearer_token>` header; default name made unique, an explicit duplicate name → 409; saved, then tested with `MCPManager.test` so `status` says whether the server answered and why not; secrets masked; emits `reference.updated`) · `POST /connectors/{id}/standard-setup` → `{operations_created: [key], operations_existing: [key], watcher_created: bool, notes: [str]}` (kind `portfolio` or `jira`, else 422; idempotent, never overwrites an existing operation (matched by key) or watcher (by name) — see §13)
 
 Operations: `GET|POST /operations`, `PUT|DELETE /operations/{id}` · `POST /operations/{id}/run` {input} → OperationResult · `POST /operations/suggest` {connector_id, intent} → Operation (draft, unsaved)
 
@@ -442,7 +443,7 @@ Activity & KPIs: `GET /events?limit=&kind=&project_id=&before=` → Event[] · `
 
 AI utilities: `POST /ai/rewrite` {text, style: 'professional'|'concise'|'executive'|'technical'|'friendly'|'fix'|'expand'|'bullets'|'jira', instructions?} → `{text}` · `GET /briefing?user_id=` → `{markdown, generated_at, ai: bool}` (cached 10 min per user; without LLM returns a deterministic summary with `ai:false`) · `POST /copilot` {user_id, chat_id?, message, project_id?} → `{chat_id, messages: ChatMessage[]}` · `GET /copilot/{chat_id}`
 
-Admin: `POST /admin/demo/install` → `{created: {users, teams, connectors, operations, watchers}}` (idempotent) · `POST /admin/demo/simulate-use-case` {hint?} → `{use_case}` (LLM invents a realistic use case, created through the sandbox DOINg.AI MCP `create_use_case` tool) · `GET /admin/export` → full JSON backup · `POST /admin/import` (backup JSON, replaces collections) · `GET /admin/llm-calls?days=`
+Admin: `GET /admin/export` → full JSON backup · `POST /admin/import` (backup JSON, replaces collections) · `GET /admin/llm-calls?days=`
 
 MCP: `/mcp` (streamable HTTP) — tools `factory_list_projects(status?)`, `factory_get_project(key_or_id)`, `factory_pending_approvals()`, `factory_kpis()`.
 
@@ -510,8 +511,8 @@ dashed edges on the Floor).
 4. **AI everywhere, one click** — AI draft for every form, ✨ reword menu, AI decision brief for approvers, AI status report per project (copy / print).
 5. **Blueprint Designer** — visual stage/step editor + "Generate blueprint from a description" (LLM).
 6. **Dependency graph** — project → required MCP servers (existing ✓ vs in delivery → child project) as an SVG graph.
-7. **Persona switcher** — act as Sponsor / Dev / Security and see their inbox instantly (demo & testing).
-8. **Sandbox demo environment** — one click installs sandbox DOINg.AI + Jira MCP servers, team, operations, watcher; "Simulate a sponsor creating a use case" invents a realistic use case with the LLM.
+7. **Persona switcher** — act as Sponsor / Dev / Security and see their inbox instantly.
+8. **Real connections in minutes** — connector templates (DOINg.AI, Jira via mcp-atlassian, any remote MCP server), one-click standard setup of the operations and watcher the builtin blueprints need, people imported from DOINg.AI.
 9. **Risk radar** — deterministic risk score with AI explanation and mitigation.
 10. **Factory as an MCP server** — other agents can query the Factory.
 
@@ -686,7 +687,8 @@ class Scheduler: def start(self) -> None; async def stop(self) -> None; running:
 # app/kpis.py      def compute_kpis(container, days: int = 30) -> dict    (Kpis)
 # app/inbox.py     def inbox_for(container, user_id: str) -> list[dict]; def inbox_counts(container, user_id: str) -> dict
 # app/ai_utils.py  (all take `container` first) rewrite(text, style, instructions) · briefing(user_id) · project_report(pid, audience) · explain_risk(pid)
-#                  summarize_project(pid) · generate_blueprint(description) · suggest_operation(connector_id, intent) · simulate_use_case(hint)
+#                  summarize_project(pid) · generate_blueprint(description) · suggest_operation(connector_id, intent)
+# app/seed/standard_ops.py  def standard_setup(container, connector_id) -> dict   (sync; §13)
 # app/copilot.py   async def chat(container, user_id, message, chat_id=None, project_id="") -> dict (Chat)
 # app/factory_mcp.py  router mounted at /mcp (JSON-RPC over HTTP POST: initialize, tools/list, tools/call, ping)
 ```
@@ -698,22 +700,78 @@ holds a pending approver role (role `sponsor` is restricted to the project's spo
 
 ---
 
-## 13. Bundled MCP servers & demo environment
+## 13. Real connections: DOINg.AI MCP server, Jira, standard setup
 
-**`mcp_servers/doing_ai_mcp.py`** (mode via env `DOING_AI_MODE=sandbox|bridge`, state `backend/data/sandbox/doing_ai.json` seeded on first run; bridge reads `DOING_AI_URL` + `/api/data`, strips password fields, write tools return an error "read-only bridge"). Shapes follow DOINg.AI `types.ts` (camelCase):
-- `list_projects(status="", updated_since="", include_archived=false)` → `{"projects": [Project + "sponsor": {id,name,email}|null, "manager": {…}|null, "businessUnit": str], "count"}`
-- `get_project(project_id)` · `list_users()` · `list_wishes(category="", status="")`
-- `list_mcp_servers(query="", deploy_status="")` → `{"mcp_servers": [McpServer…]}` · `search_mcp_servers(capability, limit=5)` → `{"matches": [{score, server}]}`
-- sandbox writes: `create_project(name, description, context="", sponsor_email="", business_unit="", deadline="", tags=[])`, `update_project_status(project_id, status="", dev_status="", note="")`, `register_mcp_server(name, description, tools=[], category="", tags=[], team_it="", deploy_status="dev", use_case="")`
-- Seed: ~8 users (sponsors/PMs), 6 projects (2 in status `Planning` = new use cases with rich `context` describing data needs; others Active/Done), 10 MCP servers (production/uat/dev) incl. tools, 3 wishes.
+Nothing fake ships in the app: the Factory starts empty and every connector points at a real system.
+Test doubles (a DOINg.AI backend, an mcp-atlassian look-alike, test people and teams) live in
+`backend/tests/fixtures/` only.
 
-**`mcp_servers/jira_mcp.py`** (state `backend/data/sandbox/jira.json`): `jira_list_projects()`, `jira_search(jql, limit=20)` (JQL subset: `project =`, `issuetype =`, `status =`, `labels =`, `summary ~ "x"`, `parent =`, `AND`), `jira_get_issue(issue_key)`, `jira_create_issue(project_key, summary, issue_type="Task", description="", priority="Medium", labels=[], parent_key="", assignee="", story_points=null, components=[])`, `jira_batch_create_issues(issues: list)`, `jira_update_issue(issue_key, fields)`, `jira_transition_issue(issue_key, status)`, `jira_add_comment(issue_key, comment)`. Every issue has `key`, `url` = `https://jira.sandbox.local/browse/<KEY>`, `status` (To Do / In Progress / Done). Seed projects: `MCPF` (MCP Factory Squad), `DATA` (Data Platform), `PAY` (Payments), `SEC` (Security Engineering), `OPS` (IT Operations — change requests, issue type `Change`).
+**Setup path** (Settings › Connectors, onboarding): 1. add a connector from a template → it is saved and
+tested; 2. run its *standard setup*; 3. for DOINg.AI, import its people (`POST /people/import-from-connector`),
+then give them their Factory roles and create the delivery teams (each with its `jira_project_key` and skills —
+routing chooses the Jira project among them).
 
-**Demo installer** (`POST /api/admin/demo/install`, idempotent, labels everything Sandbox): users (Alice Martin – Sponsor, Paul Durand – Product Manager, Sofia Rossi – Dev Lead, Karim Benali – Developer, Emma Leroy – IT Ops, Lucas Moreau – Security, Chloé Bernard – Compliance, Admin), teams mapped to Jira projects with skills, 2 stdio connectors (`sys.executable mcp_servers/…py`), operations (`portfolio.list_projects`, `portfolio.get_project`, `portfolio.search_mcp`, `portfolio.list_mcp_servers`, `portfolio.register_mcp`*, `portfolio.update_status`*, `jira.search`, `jira.get_issue`, `jira.ensure_epic`* (agent mode: search then create in the right team project), `jira.create_issue`*, `jira.create_stories`* (`jira_batch_create_issues`), `jira.create_change`*; * = sensitive), and the watcher "New DOINg.AI use cases" (every 15 min, `portfolio.list_projects` with status `Planning`, action `intake`, blueprint `use_case_onboarding`).
+**Connector templates** (`app/mcp/templates.py`, `GET /connectors/templates`):
+- `doing_ai` — kind `portfolio`, stdio `sys.executable <backend>/mcp_servers/doing_ai_mcp.py`; fields `DOING_AI_URL`
+  (required, the DOINg.AI backend, e.g. `http://localhost:3001`), `DOING_AI_TOKEN` (optional secret, sent as Bearer for
+  an instance behind an authenticating proxy — DOINg.AI's own server has no auth).
+- `jira` — kind `jira`, stdio `uvx mcp-atlassian` (sooperset/mcp-atlassian; uv required). Fields `JIRA_URL` (required);
+  Cloud: `JIRA_USERNAME` (account e-mail) + `JIRA_API_TOKEN` (secret); Server/Data Center: `JIRA_PERSONAL_TOKEN`
+  (secret) — exactly one of the two credential sets; optional `JIRA_SSL_VERIFY`, `JIRA_PROJECTS_FILTER`, `READ_ONLY_MODE`.
+- `http` — any MCP server over streamable HTTP: `url` (required) + optional `bearer_token` (secret → `Authorization` header).
+
+**`mcp_servers/doing_ai_mcp.py`** — the DOINg.AI MCP server, over the real DOINg.AI backend (`NEXUS.AI/server.py`).
+Env `DOING_AI_URL` (required), `DOING_AI_TOKEN`, `DOING_AI_TIMEOUT` (s, default 15). At start it checks
+`GET /api/version`; without a URL, with a malformed one or when DOINg.AI does not answer it exits (code 2) with the
+reason on stderr, which the connector test shows — there is no local data and no fallback. Shapes follow DOINg.AI
+`types.ts` (camelCase); responses add `sponsor` / `manager` ({id, name, email}) and `businessUnit` (name).
+- reads (from `GET /api/data`, secret fields — password hashes, MCP `token`, telemetry `apiHeaders`/`apiBody`, any
+  `*key/secret/token` — stripped and URL credentials masked): `list_projects(status="", updated_since="",
+  include_archived=false)` → `{projects, count}` · `get_project(project_id)` (id or exact name) · `list_users()` →
+  `{users, count}` · `list_wishes(category="", status="")` · `list_mcp_servers(query="", deploy_status="")` →
+  `{mcp_servers, count}` · `search_mcp_servers(capability, limit=5)` → `{matches: [{score, matched_terms, server}]}`.
+- writes: `update_project_status(project_id, status="", dev_status="", note="")` → `{ok, project, changes, merged}`
+  (appends an `auditLog` entry {id: uuid, date, userId: "", userName: "DOINg.AI Factory", action, details}, refreshes
+  `updatedAt`) · `register_mcp_server(name, description, tools=[], category="", tags=[], team_it="",
+  deploy_status="dev", use_case="", data_source="")` → `{ok, created, server, merged}` (matched by name: an existing
+  entry is updated, unset fields kept). There is no `create_project`: use cases are created by people, in DOINg.AI.
+- write protocol (DOINg.AI stores one JSON document): `GET /api/data` → change the one entity in place →
+  `POST /api/data` with the **whole document as read** (secrets, `deletedIds` tombstones and every other collection
+  untouched) and header `X-Base-Version: <lastUpdated read>`. On a concurrent write DOINg.AI merges by id (newest
+  entity wins field by field, nested `{id}` arrays such as `auditLog` unioned) and answers `merged: true`; an HTTP 409
+  is retried once on a fresh read, then reported ("refused the write twice … Nothing was changed"). A document without
+  a numeric `lastUpdated` is not DOINg.AI's state and is never written back.
+
+**Standard setup** (`app/seed/standard_ops.py`, `POST /connectors/{id}/standard-setup`): creates, bound to the
+connector, the operations the builtin blueprints call — never overwriting one that exists (matched by key; one bound
+to another connector is reported in `notes`) — so a second run only fills gaps.
+- kind `portfolio`: `portfolio.list_projects`, `portfolio.get_project`, `portfolio.search_mcp`,
+  `portfolio.list_mcp_servers`, `portfolio.register_mcp`*, `portfolio.update_status`*; and the watcher
+  "New DOINg.AI use cases" (every 15 min, `portfolio.list_projects` status `Planning`, filter `not item.isArchived`,
+  action `intake`, blueprint `use_case_onboarding`, mapping title/description/priority/sponsor_email/tags +
+  inputs doing_ai_id/context/business_unit/target_date/expected_benefits; no baseline: use cases already in Planning
+  are filed on the first run).
+- kind `jira` (mcp-atlassian tool names and argument shapes: objects/arrays as JSON strings, components as a
+  comma-separated string; an issue's page is `browse_url`, `url` is the REST link; `status` is `{name, category}`):
+  `jira.search` (`jira_search(jql, limit)`, extract `result.issues`) · `jira.get_issue` (`jira_get_issue(issue_key)`) ·
+  `jira.ensure_epic`* (agent over `jira_search` + `jira_create_issue`: reuse an open epic of the same name in the
+  project, else create it with `additional_fields '{"labels": […]}'`; output `{key, url (= browse_url), created,
+  project_key}`) · `jira.create_issue`* (`jira_create_issue(project_key, summary, issue_type, description, assignee,
+  components, additional_fields = {labels, priority: {name}, parent, "Story Points"} | compact)`, extract
+  `result.issue`) · `jira.create_stories`* (`jira_batch_create_issues(issues)`: each backlog story becomes
+  `{project_key, summary, issue_type, description, labels, "Epic Link": parent_key, "Story Points"}` — the batch tool
+  ignores `parent`, so the epic link and the estimate use the Jira Server/Data Center field names, resolved by display
+  name; a field the instance lacks is skipped by the server. On Jira Cloud adapt it in Studio › Operations) ·
+  `jira.create_change`* (`jira_create_issue` in input `project_key` (required), `issue_type` default `Change`,
+  labels/priority in `additional_fields`). * = sensitive.
+- Jira targets are configuration, never hard-coded: the delivery team (routing → `team.jira_project_key`) owns the epic
+  and stories; the production change goes to the MCP Delivery input `change_project_key` ("Change Jira project", empty =
+  the delivery team's project — give it a default in the Blueprint Designer to send every change to a
+  change-management project).
 
 **Builtin blueprints** (seeded at boot when missing, `builtin=true`, editable/duplicable):
 - `use_case_onboarding` (prefix `UC`): Intake & Qualification (qualify ai_task json · sponsor kickoff notify) → Dependency Analysis (agent_task over the portfolio connector: required capabilities vs catalog → `{required:[…], missing:[…]}` · PM approval of the analysis, reject reopens the agent with feedback) → MCP Delivery (fan_out over `vars.dependencies.missing` → `mcp_delivery`, wait all; skipped when nothing missing) → Go-live (readiness ai_task w/ review · approval sponsor+IT · portfolio.update_status · closure notify).
-- `mcp_delivery` (prefix `MCP`): Specification (human_form w/ AI prefill · team routing ai_task json · Jira epic via `jira.ensure_epic` w/ link · spec sign-off approval sponsor+dev_lead, reject → spec) → Planning (estimation w/ AI suggestion · Jira backlog ai_task json review · `jira.create_stories`) → Build & Test [parallel] (test plan ai_task · development wait_for epic Done, manual complete allowed) → Quality & Compliance (quality_gate tags `mcp` · test report human_form) → Release (release notes ai_task · `jira.create_change` w/ link · release approval IT+sponsor+security · `portfolio.register_mcp` · delivered notify).
+- `mcp_delivery` (prefix `MCP`): Specification (human_form w/ AI prefill · team routing ai_task json · Jira epic via `jira.ensure_epic` w/ link · spec sign-off approval sponsor+dev_lead, reject → spec) → Planning (estimation w/ AI suggestion · Jira backlog ai_task json review · `jira.create_stories`) → Build & Test [parallel] (test plan ai_task · development wait_for epic status category Done, manual complete allowed) → Quality & Compliance (quality_gate tags `mcp` · test report human_form) → Release (release notes ai_task · `jira.create_change` in `inputs.change_project_key` or the team's project, w/ link to its `browse_url` · release approval IT+sponsor+security · `portfolio.register_mcp` · delivered notify).
 - `change_request` (prefix `CR`): small 2-stage example (impact analysis ai_task → approval → notify).
 
 **Default compliance rules** (tags `mcp`, `security`, `data`, …) ~15: authentication required, least-privilege service account, secrets never in code, PII classification & masking, input validation / parameterised queries, tool annotations (readOnly/destructive) declared, rate limits & timeouts, audit logging of tool calls, error messages don't leak internals, documented tools & parameters, test set ≥ critical paths, monitoring & health endpoint, versioning & changelog, data residency/GDPR basis, owner & support contact defined.
@@ -726,7 +784,6 @@ holds a pending approver role (role `sponsor` is restricted to the project's spo
 - Templating: `fan_out.items`, `watcher.items_expr`, `when`, `wait_for.until` accept either a bare Jinja expression (`vars.dependencies.missing`) or a single `{{ … }}` expression — strip the braces before `evaluate`.
 - Agent `allowed_tools` may contain bare tool names (`jira_search`) or qualified ones (`jira__jira_search`); resolve bare names within the step's connectors.
 - `mcp_delivery.team_routing` output (`{team_id, team_name, jira_project_key, rationale}`): when a step's output is a dict containing a valid `team_id` and the project has no `team_id` yet, the engine sets `project.team_id` (records `project.updated`). This is the only implicit project mutation from step outputs.
-- Sandbox simulation calls the DOINg.AI tool `create_project` (not `create_use_case`).
 - Connector secrets: env/header values whose KEY looks secret (token|key|secret|password|auth|cookie|session|credential) are masked on read (`util.public_connector`); other values stay readable.
 - `engine/executors_flow.py` and `engine/guard.py` signatures are chosen by the engine / AI-executor builders; they must add them to `tests/test_contracts.py`.
 - `backend/tests/test_contracts.py` pins every §12 interface — keep it green.

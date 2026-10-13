@@ -1,7 +1,7 @@
 """A small MCP server over stdio, standard library only.
 
-Ported from the AGENT project (`agent/mcp_servers/_mcp_stdio.py`); the two bundled sandbox
-servers (DOINg.AI Portfolio, Jira) sit on top of it. Hand-rolled rather than taken from an
+Ported from the AGENT project (`agent/mcp_servers/_mcp_stdio.py`); the bundled DOINg.AI MCP
+server (`doing_ai_mcp.py`) sits on top of it. Hand-rolled rather than taken from an
 SDK: the protocol surface a tool server needs is small, a cold start costs ~10 ms instead of
 ~0.5 s for an SDK import (the Factory spawns a stdio server per operation), and one readable
 file is an attack surface you can actually review.
@@ -9,29 +9,16 @@ file is an attack surface you can actually review.
 Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout, MCP 2025-06-18. Anything written to
 stdout that is not a protocol message corrupts the stream, so diagnostics go to stderr — the
 Factory keeps its tail and shows it on the connector card.
-
-Also here: `JsonState`, the on-disk JSON "world" both sandboxes keep their data in.
 """
 from __future__ import annotations
 
 import inspect
 import json
-import os
 import re
 import sys
 import traceback
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
-try:   # POSIX
-    import fcntl
-except ImportError:   # pragma: no cover - Windows
-    fcntl = None   # type: ignore[assignment]
-try:   # Windows
-    import msvcrt
-except ImportError:
-    msvcrt = None   # type: ignore[assignment]
 
 PROTOCOL_VERSION = "2025-06-18"
 # Older revisions a client may still ask for. The tool surface used here is identical in
@@ -274,68 +261,3 @@ def _coerce(value: Any, kind: str | None, spec: dict) -> Any:
             item_kind = item.get("type") if isinstance(item.get("type"), str) else None
             return [_coerce(v, item_kind, item) for v in value]
     return value
-
-
-# ---------------------------------------------------------------------------
-# On-disk JSON state
-# ---------------------------------------------------------------------------
-
-class JsonState:
-    """A JSON document on disk: the whole world of a sandbox server.
-
-    The file, not the process, is the state. The Factory spawns a fresh server per operation
-    and may run two at once (parallel stages), so every read reloads the file and every write
-    is a read-modify-write under an exclusive lock file, committed with tmp + os.replace — a
-    crash never leaves half a file and two writers never lose each other's changes.
-    """
-
-    def __init__(self, path: str | Path, seed: Callable[[], dict]) -> None:
-        self.path = Path(path).expanduser().resolve()
-        self._seed = seed
-
-    def read(self) -> dict:
-        if not self.path.exists():
-            with self.write():   # first run: seed under the lock (another process may race us)
-                pass
-        return self._load()
-
-    @contextmanager
-    def write(self) -> Iterator[dict]:
-        """Yield the current state; whatever the block leaves in it is saved atomically.
-        An exception inside the block saves nothing."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with _locked(self.path.with_name(self.path.name + ".lock")):
-            data = self._load() if self.path.exists() else self._seed()
-            yield data
-            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
-
-    def _load(self) -> dict:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            # Never re-seed over a damaged file silently: that would wipe the user's data.
-            raise ToolError(f"Sandbox state {self.path} is unreadable ({exc}). Fix it, or delete it "
-                            "to start again from the seed data.") from None
-        if not isinstance(data, dict):
-            raise ToolError(f"Sandbox state {self.path} is not a JSON object. Delete it to re-seed.")
-        return data
-
-
-@contextmanager
-def _locked(lock_path: Path) -> Iterator[None]:
-    with open(lock_path, "a+b") as fh:
-        if fcntl is not None:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        elif msvcrt is not None:   # pragma: no cover - Windows
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            elif msvcrt is not None:   # pragma: no cover - Windows
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)

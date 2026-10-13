@@ -4,8 +4,8 @@
 // new intake. While the Factory is not set up yet, a setup checklist replaces the empty widgets.
 // Every number comes from the API; nothing is invented while loading (skeletons instead).
 import {
-  ArrowRight, Bot, CheckCircle2, ChevronRight, Circle, Clock3, Factory, FolderKanban, Gauge, Inbox as InboxIcon,
-  PlayCircle, Plug, Plus, Radar, RefreshCw, ShieldAlert, Sparkles, ThumbsUp, Timer, Users, Wand2, Zap,
+  ArrowRight, Bot, Briefcase, CheckCircle2, ChevronRight, Circle, Clock3, Factory, FolderKanban, Gauge, Inbox as InboxIcon,
+  ListChecks, ListPlus, PlayCircle, Plug, Plus, Radar, RefreshCw, ShieldAlert, Sparkles, ThumbsUp, Timer, Users, Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -14,13 +14,14 @@ import { api, errorMessage } from '../api';
 import { Markdown } from '../components/Markdown';
 import { iconByName } from '../components/StepIcon';
 import {
-  Badge, Button, Card, CardHeader, EmptyState, IconButton, Skeleton, Stat, TONE, Tooltip, toneOf, useToast,
+  Badge, Button, Card, CardHeader, EmptyState, IconButton, Skeleton, Stat, TONE, Tooltip, toneOf, useBusy, useToast,
 } from '../components/ui';
 import { cls } from '../lib/cls';
 import { dueLabel, formatDate, formatDateTime, formatNumber, plural, timeAgo } from '../lib/format';
 import { usePageTitle } from '../lib/pageTitle';
 import { Link, navigate, paths } from '../lib/router';
 import { RISK } from '../lib/status';
+import { readStorage, STORAGE_KEYS, writeStorage } from '../lib/storage';
 import { useApp, useLive } from '../lib/store';
 import type { Briefing, Event, InboxItem, IntakeItem, Kpis, ProjectSummary } from '../types';
 import { upsertSummary } from './project/model';
@@ -28,6 +29,7 @@ import { AiChip, ActorName } from './task/common';
 import { factoryFlow, greeting } from './task/logic';
 import type { FlowRow } from './task/logic';
 import { activityMeta, INBOX_KIND } from './task/meta';
+import { connectorOfKind, hasStandardSetup, ImportPeopleButton, standardSetupSummary } from './settings/connectorSetup';
 
 const NEEDS_YOU_MAX = 6;
 const ACTIVITY_MAX = 15;
@@ -133,7 +135,15 @@ export default function Home() {
   });
 
   // ---- Setup state ------------------------------------------------------------------------------
-  const setupIncomplete = !!onboarding && (!onboarding.llm_configured || !onboarding.has_connectors || !onboarding.has_users);
+  // The core (model, a connector, people) keeps the checklist up; the optional rest can be hidden.
+  const [setupHidden, setSetupHidden] = useState(() => readStorage(STORAGE_KEYS.setupHidden) === '1');
+  const coreIncomplete = !!onboarding && (!onboarding.llm_configured || !onboarding.has_connectors || !onboarding.has_users);
+  const anyIncomplete = !!onboarding && (coreIncomplete || !onboarding.has_portfolio || !onboarding.has_jira || !onboarding.has_standard_operations);
+  const setupIncomplete = coreIncomplete || (anyIncomplete && !setupHidden);
+  const hideSetup = () => {
+    writeStorage(STORAGE_KEYS.setupHidden, '1');
+    setSetupHidden(true);
+  };
   const kpiTotal = kpis ? kpis.totals.active + kpis.totals.waiting + kpis.totals.blocked + kpis.totals.done_period : 0;
   const nothingYet = projects !== null && projects.length === 0 && (inbox?.length ?? 0) === 0 && kpiTotal === 0 && (intake?.length ?? 0) === 0;
   const flow = useMemo(() => factoryFlow(projects ?? [], blueprints), [projects, blueprints]);
@@ -201,7 +211,7 @@ export default function Home() {
         </div>
       </section>
 
-      {setupIncomplete && <SetupChecklist />}
+      {setupIncomplete && <SetupChecklist onHide={coreIncomplete ? undefined : hideSetup} />}
 
       {!(setupIncomplete && nothingYet) && (
         <>
@@ -248,25 +258,22 @@ export default function Home() {
 // Setup checklist (shown until an LLM, connectors and people exist)
 // ---------------------------------------------------------------------------------------------
 
-function SetupChecklist() {
-  const { onboarding, reload, isAdmin } = useApp();
+function SetupChecklist({ onHide }: { onHide?: () => void }) {
+  const { onboarding, connectors, reload, isAdmin } = useApp();
   const toast = useToast();
-  const [installing, setInstalling] = useState(false);
+  const [busy, run] = useBusy();
   if (!onboarding) return null;
 
-  const installDemo = async () => {
-    setInstalling(true);
-    try {
-      const res = await api.admin.installDemo();
-      await reload();
-      const c = res.created;
-      toast.success(`Demo environment installed — ${plural(c.users, 'person', 'people')}, ${plural(c.connectors, 'connector')}, ${plural(c.operations, 'operation')}, ${plural(c.watchers, 'watcher')}.`);
-    } catch (err) {
-      toast.error(err);
-    } finally {
-      setInstalling(false);
+  const portfolio = connectorOfKind(connectors, 'portfolio');
+  const setupTargets = connectors.filter((c) => c.enabled && hasStandardSetup(c));
+  const addConnector = (template: string) => navigate(`${paths.settings('connectors')}?add=${template}`);
+  const createStandardOperations = () => run('std', async () => {
+    for (const c of setupTargets) {
+      const res = await api.connectors.standardSetup(c.id);
+      toast.success(`${c.name}: ${standardSetupSummary(res)}`);
     }
-  };
+    await reload();
+  });
 
   const items: Array<{ done: boolean; title: string; text: string; icon: LucideIcon; action: ReactNode }> = [
     {
@@ -277,27 +284,49 @@ function SetupChecklist() {
       action: <Button size="sm" variant={onboarding.llm_configured ? 'ghost' : 'primary'} iconRight={ArrowRight} onClick={() => navigate(paths.settings('ai'))}>{onboarding.llm_configured ? 'Review' : 'Connect'}</Button>,
     },
     {
-      done: onboarding.has_connectors,
-      title: 'Connect your tools',
-      text: 'Install the sandbox (DOINg.AI catalog, Jira, notifications, git — all simulated) or add your own MCP connectors.',
-      icon: Plug,
-      action: (
-        <div className="flex flex-wrap justify-end gap-2">
-          {!onboarding.demo_installed && (
-            <Tooltip content={isAdmin ? 'Idempotent — safe to run twice' : 'Requires the admin role'}>
-              <Button size="sm" variant={onboarding.has_connectors ? 'outline' : 'primary'} icon={Wand2} busy={installing} onClick={() => void installDemo()}>Install demo</Button>
-            </Tooltip>
-          )}
-          <Button size="sm" variant="ghost" onClick={() => navigate(paths.settings('connectors'))}>Add connectors</Button>
-        </div>
-      ),
+      done: onboarding.has_portfolio,
+      title: 'Connect DOINg.AI',
+      text: 'Your use-case portfolio: its URL (and a token if it needs one). New use cases registered by sponsors reach Intake from there.',
+      icon: Briefcase,
+      action: onboarding.has_portfolio
+        ? <Button size="sm" variant="ghost" iconRight={ArrowRight} onClick={() => navigate(paths.settings('connectors'))}>Review</Button>
+        : <Button size="sm" variant="primary" icon={Plug} onClick={() => addConnector('doing_ai')}>Connect</Button>,
+    },
+    {
+      done: onboarding.has_jira,
+      title: 'Connect Jira',
+      text: 'Through the mcp-atlassian server with your site URL, e-mail and API token — epics and stories are written there.',
+      icon: ListChecks,
+      action: onboarding.has_jira
+        ? <Button size="sm" variant="ghost" iconRight={ArrowRight} onClick={() => navigate(paths.settings('connectors'))}>Review</Button>
+        : <Button size="sm" variant="outline" icon={Plug} onClick={() => addConnector('jira')}>Connect</Button>,
+    },
+    {
+      done: onboarding.has_standard_operations,
+      title: 'Create the standard operations',
+      text: setupTargets.length
+        ? 'The usual operations of DOINg.AI and Jira (list new use cases, create an epic…) plus the watcher that fills Intake.'
+        : 'Connect DOINg.AI or Jira first — then one click creates their usual operations and the intake watcher.',
+      icon: ListPlus,
+      action: onboarding.has_standard_operations
+        ? <Button size="sm" variant="ghost" iconRight={ArrowRight} onClick={() => navigate(paths.operations())}>Review</Button>
+        : (
+          <Tooltip content={isAdmin ? 'Safe to run twice — existing operations are kept' : 'Requires the admin role'}>
+            <Button size="sm" variant="outline" icon={ListPlus} busy={busy === 'std'} disabled={!setupTargets.length} onClick={() => void createStandardOperations()}>Create</Button>
+          </Tooltip>
+        ),
     },
     {
       done: onboarding.has_users,
       title: 'Add the people',
-      text: 'Sponsors, PMs, developers, IT, security and compliance — with their roles, so every step reaches the right inbox.',
+      text: 'Import the sponsors and PMs your DOINg.AI knows, then add developers, IT, security and compliance and give everyone their roles.',
       icon: Users,
-      action: <Button size="sm" variant={onboarding.has_users ? 'ghost' : 'outline'} iconRight={ArrowRight} onClick={() => navigate(paths.settings('people'))}>{onboarding.has_users ? 'Review' : 'Add people'}</Button>,
+      action: (
+        <div className="flex flex-wrap justify-end gap-2">
+          {portfolio && !onboarding.has_users && <ImportPeopleButton connector={portfolio} />}
+          <Button size="sm" variant={onboarding.has_users || portfolio ? 'ghost' : 'outline'} iconRight={ArrowRight} onClick={() => navigate(paths.settings('people'))}>{onboarding.has_users ? 'Review' : 'Add people'}</Button>
+        </div>
+      ),
     },
   ];
   const done = items.filter((i) => i.done).length;
@@ -307,8 +336,9 @@ function SetupChecklist() {
       <CardHeader
         eyebrow="Get started"
         title="Set up your factory"
-        subtitle={`${done} of ${items.length} done — a few minutes and the whole flow runs end to end.`}
+        subtitle={`${done} of ${items.length} done — connect your real systems and the whole flow runs end to end.`}
         icon={Factory}
+        actions={onHide ? <Button size="xs" variant="ghost" onClick={onHide}>Hide</Button> : undefined}
       />
       <ol className="divide-y hairline">
         {items.map((it) => (

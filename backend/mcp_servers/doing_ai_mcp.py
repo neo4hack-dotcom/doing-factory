@@ -1,16 +1,25 @@
-"""DOINg.AI Portfolio — an MCP server over the DOINg.AI project portfolio (docs/SPEC.md §13).
+"""DOINg.AI MCP server — the DOINg.AI project portfolio over MCP (docs/SPEC.md §13).
 
-    DOING_AI_MODE=sandbox|bridge  python doing_ai_mcp.py
+    DOING_AI_URL=http://localhost:3001  python doing_ai_mcp.py
 
-- `sandbox` (default): a local JSON world (env DOING_AI_STATE, default
-  backend/data/sandbox/doing_ai.json), seeded on first run with a coherent corporate &
-  investment bank portfolio: 8 people, 6 projects (2 new use cases in status Planning whose
-  context implies MCP servers that do not exist yet), a catalog of 10 MCP servers, 3 wishes.
-  Every tool works, writes included.
-- `bridge`: reads the real DOINg.AI (env DOING_AI_URL, e.g. http://localhost:3001) through its
-  `GET /api/data`, read-only. That endpoint returns the whole application state, password
-  hashes and MCP tokens included, so secret fields are stripped before anything leaves this
-  process; write tools refuse with a clear message.
+Talks to a running DOINg.AI backend (its `server.py`) and nothing else: there is no local
+data and no fallback. Without DOING_AI_URL, or when `GET /api/version` does not answer, the
+process refuses to start and says why on stderr (shown on the connector card).
+
+- Reads: `GET /api/data` returns the whole application state, password hashes, MCP tokens and
+  API-fed telemetry headers included, so secret fields are stripped (and credentials in URLs
+  masked) before anything leaves this process.
+- Writes (`update_project_status`, `register_mcp_server`): DOINg.AI stores one JSON document,
+  so a write is read-modify-write of the *whole* document: `GET /api/data` → change one entity
+  in place (its `updatedAt` refreshed) → `POST /api/data` with the full document and header
+  `X-Base-Version: <lastUpdated it was read at>`. Nothing else in the document is touched:
+  secrets, `deletedIds` tombstones and every other collection go back exactly as read. When
+  another client wrote in between, DOINg.AI merges by id (the most recently updated version of
+  each entity wins, nested `{id}` arrays such as `auditLog` are unioned) and answers
+  `merged: true`; a 409 (stale version refused) is retried once on a fresh read, then reported.
+  A document without `lastUpdated` is not DOINg.AI's state and is never written back.
+- DOING_AI_TOKEN (optional): sent as `Authorization: Bearer …`, for an instance behind an
+  authenticating reverse proxy. DOING_AI_TIMEOUT: seconds per HTTP call (default 15).
 
 Shapes follow DOINg.AI's `src/types.ts` (camelCase: Project, McpServer, WishItem, User,
 BusinessUnit). Responses add resolved convenience objects (`sponsor`, `manager` as
@@ -27,14 +36,13 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _mcp_stdio import JsonState, McpServer, ToolError  # noqa: E402
+from _mcp_stdio import McpServer, ToolError  # noqa: E402
 
-VERSION = "1.0.0"
-DEFAULT_STATE = Path(__file__).resolve().parents[1] / "data" / "sandbox" / "doing_ai.json"
+VERSION = "2.0.0"
 
 PROJECT_STATUSES = ("Planning", "Active", "Paused", "Done")
 DEV_STATUSES = ("to_start", "dev", "uat", "prod")
@@ -53,56 +61,104 @@ _SECRET_KEY = re.compile(r"^(password|passwordhash|passwordsalt|token|apikey|api
 _URL_CREDENTIALS = re.compile(r"(://[^/@\s:]+:)[^/@\s]+@")
 _URL_SECRET_PARAM = re.compile(r"([?&](?:api[_-]?key|key|token|access_token|secret|password|sig|signature)=)[^&#\s]+",
                                re.IGNORECASE)
+ACTOR = "DOINg.AI Factory"
 
 
 # ---------------------------------------------------------------------------
-# Data access: sandbox file or read-only bridge
+# DOINg.AI over HTTP
 # ---------------------------------------------------------------------------
 
-class Portfolio:
-    def __init__(self) -> None:
-        self.mode = (os.environ.get("DOING_AI_MODE") or "sandbox").strip().lower()
-        if self.mode not in ("sandbox", "bridge"):
-            raise SystemExit(f"DOING_AI_MODE must be 'sandbox' or 'bridge', got {self.mode!r}")
-        self.state = JsonState(os.environ.get("DOING_AI_STATE") or DEFAULT_STATE, seed_state)
-        self.url = (os.environ.get("DOING_AI_URL") or "").strip().rstrip("/")
-        self.token = (os.environ.get("DOING_AI_TOKEN") or "").strip()
-        self.timeout = float(os.environ.get("DOING_AI_TIMEOUT") or 15)
+class Conflict(Exception):
+    """DOINg.AI refused a write made on a stale version (HTTP 409)."""
 
-    def snapshot(self) -> dict[str, list[dict]]:
-        raw = self.state.read() if self.mode == "sandbox" else self._fetch()
-        return {name: [r for r in (raw.get(name) or []) if isinstance(r, dict)] for name in COLLECTIONS}
 
-    def writable(self, tool: str):
-        if self.mode != "sandbox":
-            raise ToolError(f"read-only bridge: {tool} is not available while this server reads the live "
-                            "DOINg.AI. Make the change in DOINg.AI itself, or run the connector in sandbox "
-                            "mode (DOING_AI_MODE=sandbox).")
-        return self.state.write()
+class DoingAI:
+    def __init__(self, url: str, token: str = "", timeout: float = 15) -> None:
+        self.url = url.strip().rstrip("/")
+        self.token = token.strip()
+        self.timeout = timeout
 
-    def _fetch(self) -> dict:
-        if not self.url:
-            raise ToolError("Bridge mode needs DOING_AI_URL (e.g. http://localhost:3001) in the connector's environment.")
-        headers = {"Accept": "application/json"}
+    @classmethod
+    def from_env(cls) -> "DoingAI":
+        url = (os.environ.get("DOING_AI_URL") or "").strip()
+        if not url:
+            raise SystemExit("DOING_AI_URL is not set: give the address of the DOINg.AI backend, e.g. "
+                             "http://localhost:3001 (its server.py), in the connector's environment.")
+        if not url.startswith(("http://", "https://")):
+            raise SystemExit(f"DOING_AI_URL must start with http:// or https:// (got {url!r}).")
+        try:
+            timeout = float(os.environ.get("DOING_AI_TIMEOUT") or 15)
+        except ValueError:
+            raise SystemExit("DOING_AI_TIMEOUT must be a number of seconds.") from None
+        return cls(url, os.environ.get("DOING_AI_TOKEN") or "", timeout)
+
+    def _call(self, method: str, path: str, body: dict | None = None, headers: dict | None = None) -> Any:
+        sent = {"Accept": "application/json", **(headers or {})}
         if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        request = urllib.request.Request(f"{self.url}/api/data", headers=headers)
+            sent["Authorization"] = f"Bearer {self.token}"
+        data = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            sent["Content-Type"] = "application/json"
+        request = urllib.request.Request(f"{self.url}{path}", data=data, headers=sent, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise ToolError(f"DOINg.AI answered HTTP {exc.code} on GET {self.url}/api/data. "
-                            "Check DOING_AI_URL and, if the instance is protected, DOING_AI_TOKEN.") from None
+            if exc.code == 409:
+                raise Conflict() from None
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:300]
+            except Exception:  # noqa: BLE001
+                pass
+            raise ToolError(f"DOINg.AI answered HTTP {exc.code} on {method} {self.url}{path}"
+                            + (f": {detail}" if detail else "")
+                            + ". Check DOING_AI_URL and, if the instance is protected, DOING_AI_TOKEN.") from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise ToolError(f"Cannot reach DOINg.AI at {self.url} ({reason}). Is it running? Check DOING_AI_URL.") from None
+        try:
+            return json.loads(raw)
         except ValueError:
-            raise ToolError(f"{self.url}/api/data did not return JSON — is DOING_AI_URL the DOINg.AI backend "
+            raise ToolError(f"{self.url}{path} did not return JSON — is DOING_AI_URL the DOINg.AI backend "
                             "(port 3001 by default), not its web UI?") from None
+
+    def document(self) -> dict:
+        """The whole DOINg.AI state as stored, secrets included (only ever sent back to DOINg.AI)."""
+        body = self._call("GET", "/api/data")
         if not isinstance(body, dict):
             raise ToolError(f"{self.url}/api/data returned {type(body).__name__}, expected the DOINg.AI state object.")
-        state = body.get("state") if isinstance(body.get("state"), dict) else body
-        return strip_secrets({name: state.get(name) or [] for name in COLLECTIONS})
+        return body
+
+    def snapshot(self) -> dict[str, list[dict]]:
+        """The collections the tools read, secrets stripped."""
+        doc = self.document()
+        return strip_secrets({name: [r for r in (doc.get(name) or []) if isinstance(r, dict)] for name in COLLECTIONS})
+
+    def write(self, tool: str, change: Callable[[dict], Any]) -> tuple[Any, bool]:
+        """Read the document, apply `change` to it in place (it returns the tool's answer, or
+        raises ToolError and nothing is written), send it back under optimistic concurrency.
+        → (answer, merged). A stale-version refusal (409) is retried once on a fresh read."""
+        for attempt in (1, 2):
+            doc = self.document()
+            if not isinstance(doc.get("lastUpdated"), (int, float)) or isinstance(doc.get("lastUpdated"), bool):
+                raise ToolError(f"{self.url}/api/data has no 'lastUpdated' version: this is not the DOINg.AI "
+                                f"state document, so {tool} refuses to write to it (it would overwrite the "
+                                "whole store). Check DOING_AI_URL.")
+            base = str(doc["lastUpdated"])
+            answer = change(doc)
+            try:
+                reply = self._call("POST", "/api/data", doc, {"X-Base-Version": base})
+            except Conflict:
+                if attempt == 1:
+                    continue
+                raise ToolError(f"DOINg.AI refused the write twice: the data changed while {tool} was saving. "
+                                "Nothing was changed; run it again.") from None
+            if not isinstance(reply, dict) or reply.get("ok") is not True:
+                raise ToolError(f"DOINg.AI did not confirm the write of {tool}: {str(reply)[:300]}")
+            return answer, bool(reply.get("merged"))
+        raise AssertionError("unreachable")   # pragma: no cover
 
 
 def strip_secrets(value: Any) -> Any:
@@ -117,14 +173,20 @@ def strip_secrets(value: Any) -> Any:
     return value
 
 
-PORTFOLIO: Portfolio | None = None
+CLIENT: DoingAI | None = None
 
 
-def _portfolio() -> Portfolio:
-    global PORTFOLIO
-    if PORTFOLIO is None:
-        PORTFOLIO = Portfolio()
-    return PORTFOLIO
+def _doing_ai() -> DoingAI:
+    global CLIENT
+    if CLIENT is None:
+        CLIENT = DoingAI.from_env()
+    return CLIENT
+
+
+def _lists(doc: dict) -> dict[str, list[dict]]:
+    """The collections of a raw document; the entities are the document's own objects, so a
+    change to one is a change to the document. Absent collections read as empty (not created)."""
+    return {name: [r for r in (doc.get(name) or []) if isinstance(r, dict)] for name in COLLECTIONS}
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +194,8 @@ def _portfolio() -> Portfolio:
 # ---------------------------------------------------------------------------
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """An ISO instant as DOINg.AI writes them (JavaScript's toISOString)."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _ascii(text: str) -> str:
@@ -296,10 +359,11 @@ def score_server(query: list[str], server: dict) -> tuple[float, list[str]]:
 # ---------------------------------------------------------------------------
 
 server = McpServer(
-    "doing-ai-portfolio", VERSION, "DOINg.AI Portfolio",
+    "doing-ai", VERSION, "DOINg.AI",
     instructions="The DOINg.AI portfolio of AI use cases (projects), the people behind them, the catalog of "
                  "MCP servers and the wish list. New use cases are projects in status 'Planning'. Use "
-                 "search_mcp_servers to check whether a capability already exists in the catalog.",
+                 "search_mcp_servers to check whether a capability already exists in the catalog. "
+                 "update_project_status and register_mcp_server write to the live DOINg.AI.",
 )
 
 _STRING = {"type": "string"}
@@ -315,7 +379,7 @@ _STRING = {"type": "string"}
         "include_archived": {"type": "boolean", "description": "Include archived projects (default false)"}}},
     read_only=True)
 def list_projects(status: str = "", updated_since: str = "", include_archived: bool = False) -> dict:
-    data = _portfolio().snapshot()
+    data = _doing_ai().snapshot()
     wanted = _pick(status, PROJECT_STATUSES, "status") if status.strip() else ""
     since = _parse_since(updated_since) if updated_since.strip() else None
     rows = []
@@ -343,14 +407,14 @@ def list_projects(status: str = "", updated_since: str = "", include_archived: b
     """, {"type": "object", "properties": {"project_id": {"type": "string"}}, "required": ["project_id"]},
     read_only=True)
 def get_project(project_id: str) -> dict:
-    data = _portfolio().snapshot()
+    data = _doing_ai().snapshot()
     return _project_view(_find_project(data, project_id), data, full=True)
 
 
 @server.tool("list_users", "People in DOINg.AI (sponsors, project managers, contributors) — never any credential.",
              {"type": "object", "properties": {}}, read_only=True)
 def list_users() -> dict:
-    users = [_public_user(u) for u in _portfolio().snapshot()["users"]]
+    users = [_public_user(u) for u in _doing_ai().snapshot()["users"]]
     return {"users": users, "count": len(users)}
 
 
@@ -362,7 +426,7 @@ def list_users() -> dict:
         "status": {"type": "string", "description": "submitted | under_review | accepted | in_progress | done | rejected | on_hold ('' = all)"}}},
     read_only=True)
 def list_wishes(category: str = "", status: str = "") -> dict:
-    data = _portfolio().snapshot()
+    data = _doing_ai().snapshot()
     cat = _pick(category, WISH_CATEGORIES, "category") if category.strip() else ""
     st = _pick(status, WISH_STATUSES, "wish_status") if status.strip() else ""
     rows = [w for w in data["wishes"] if (not cat or w.get("category") == cat) and (not st or w.get("status") == st)]
@@ -377,7 +441,7 @@ def list_wishes(category: str = "", status: str = "") -> dict:
         "deploy_status": {"type": "string", "description": "dev | uat | production ('' = all)"}}},
     read_only=True)
 def list_mcp_servers(query: str = "", deploy_status: str = "") -> dict:
-    data = _portfolio().snapshot()
+    data = _doing_ai().snapshot()
     deploy = _pick(deploy_status, DEPLOY_STATUSES, "deploy_status") if deploy_status.strip() else ""
     rows = [s for s in data["mcpServers"] if not deploy or s.get("deployStatus") == deploy]
     if query.strip():
@@ -404,7 +468,7 @@ def search_mcp_servers(capability: str, limit: int = 5) -> dict:
     if not query:
         raise ToolError(f"'{capability}' has no distinctive word to search for. Name the data or system, "
                         "e.g. 'intraday payment flows' or 'loan covenant definitions'.")
-    data = _portfolio().snapshot()
+    data = _doing_ai().snapshot()
     scored = []
     for s in data["mcpServers"]:
         score, matched = score_server(query, s)
@@ -416,67 +480,10 @@ def search_mcp_servers(capability: str, limit: int = 5) -> dict:
             "note": "score ≥ 0.6: most words match; < 0.4: only incidental words match — likely not this capability."}
 
 
-@server.tool("create_project", """
-    Create a new use case in DOINg.AI, in status 'Planning' (sandbox only). The sponsor is found
-    by e-mail and the business unit by name; unknown ones are reported in `warnings`.
-    """, {"type": "object", "properties": {
-        "name": _STRING, "description": _STRING,
-        "context": {"type": "string", "description": "Business context, data needs, constraints"},
-        "sponsor_email": _STRING,
-        "business_unit": {"type": "string", "description": "Business unit name (or id)"},
-        "deadline": {"type": "string", "description": "Target date, YYYY-MM-DD"},
-        "tags": {"type": "array", "items": _STRING}},
-        "required": ["name", "description"]})
-def create_project(name: str, description: str, context: str = "", sponsor_email: str = "",
-                   business_unit: str = "", deadline: str = "", tags: list[str] | None = None) -> dict:
-    name, description = (name or "").strip(), (description or "").strip()
-    if not name or not description:
-        raise ToolError("name and description are required and cannot be empty.")
-    if deadline.strip():
-        try:
-            deadline = datetime.fromisoformat(deadline.strip()[:10]).date().isoformat()
-        except ValueError:
-            raise ToolError(f"deadline '{deadline}' is not a date (YYYY-MM-DD).") from None
-    with _portfolio().writable("create_project") as data:
-        existing = next((p for p in data["projects"] if (p.get("name") or "").strip().lower() == name.lower()), None)
-        if existing:
-            raise ToolError(f"A project named '{name}' already exists.", project_id=existing.get("id"),
-                            status=existing.get("status"))
-        warnings = []
-        sponsor = None
-        if sponsor_email.strip():
-            sponsor = next((u for u in data["users"] if (u.get("email") or "").lower() == sponsor_email.strip().lower()), None)
-            if sponsor is None:
-                warnings.append(f"No DOINg.AI user with e-mail {sponsor_email}: the project has no sponsor.")
-        unit = None
-        if business_unit.strip():
-            wanted = business_unit.strip().lower()
-            unit = next((b for b in data["businessUnits"]
-                         if wanted in ((b.get("name") or "").lower(), (b.get("id") or "").lower())), None)
-            if unit is None:
-                warnings.append(f"Unknown business unit '{business_unit}'. Known: "
-                                + ", ".join(b.get("name", "") for b in data["businessUnits"]))
-        now = _now()
-        project = {
-            "id": f"prj-{uuid4().hex[:8]}", "name": name, "description": description, "context": context.strip(),
-            "notes": "", "status": "Planning", "devStatus": "to_start",
-            "managerId": "", "sponsorId": sponsor["id"] if sponsor else "",
-            "businessUnitId": unit["id"] if unit else "",
-            "startDate": now[:10], "deadline": deadline.strip(), "isImportant": False, "isArchived": False,
-            "confidentiality": "internal", "members": [], "tasks": [], "milestones": [], "technologyIds": [],
-            "repoIds": [], "mcpServerIds": [], "agentIds": [], "dataFeedIds": [],
-            "tags": [t.strip() for t in tags or [] if str(t).strip()],
-            "auditLog": [_audit("Created", "Use case created through the DOINg.AI MCP server", sponsor)],
-            "createdAt": now, "updatedAt": now,
-        }
-        data["projects"].append(project)
-        view = _project_view(project, data, full=True)
-    return {"ok": True, "project": view, "warnings": warnings}
-
-
 @server.tool("update_project_status", """
-    Move a DOINg.AI project forward (sandbox only): status Planning | Active | Paused | Done and/or
-    dev status to_start | dev | uat | prod. `note` is appended to the project notes and audit log.
+    Move a DOINg.AI project forward: status Planning | Active | Paused | Done and/or dev status
+    to_start | dev | uat | prod. `note` is appended to the project notes. Every call adds an
+    entry to the project's audit log. Writes to the live DOINg.AI.
     """, {"type": "object", "properties": {
         "project_id": _STRING,
         "status": {"type": "string", "description": "Planning | Active | Paused | Done ('' = unchanged)"},
@@ -488,8 +495,9 @@ def update_project_status(project_id: str, status: str = "", dev_status: str = "
     new_dev = _pick(dev_status, DEV_STATUSES, "dev_status") if dev_status.strip() else ""
     if not (new_status or new_dev or note.strip()):
         raise ToolError("Nothing to update: give status, dev_status or note.")
-    with _portfolio().writable("update_project_status") as data:
-        project = _find_project(data, project_id)
+
+    def change(doc: dict) -> dict:
+        project = _find_project(_lists(doc), project_id)
         changes = []
         if new_status and new_status != project.get("status"):
             changes.append(f"status {project.get('status')} → {new_status}")
@@ -500,16 +508,25 @@ def update_project_status(project_id: str, status: str = "", dev_status: str = "
         now = _now()
         if note.strip():
             project["notes"] = (f"{project.get('notes', '').rstrip()}\n\n" if project.get("notes") else "") + f"[{now[:10]}] {note.strip()}"
-        project.setdefault("auditLog", []).append(_audit("Status updated", "; ".join(changes) or note.strip(), None))
+        details = "; ".join(changes)
+        if note.strip():
+            details = f"{details} — {note.strip()}" if details else note.strip()
+        if not isinstance(project.get("auditLog"), list):
+            project["auditLog"] = []
+        project["auditLog"].append(_audit("Status updated" if changes else "Note added", details))
         project["updatedAt"] = now
-        view = _project_view(project, data, full=True)
-    return {"ok": True, "project": view, "changes": changes}
+        return {"project": _project_view(strip_secrets(project), strip_secrets(_lists(doc)), full=True),
+                "changes": changes}
+
+    answer, merged = _doing_ai().write("update_project_status", change)
+    return {"ok": True, **answer, "merged": merged}
 
 
 @server.tool("register_mcp_server", """
-    Register an MCP server in the DOINg.AI catalog (sandbox only), e.g. once the Factory delivered
-    it. Registering a name that already exists updates that entry (created=false) — safe to retry.
-    `tools` items are {name, description} objects or "name — description" strings.
+    Register an MCP server in the DOINg.AI catalog, e.g. once the Factory delivered it.
+    Registering a name that already exists updates that entry (created=false) — safe to retry.
+    `tools` items are {name, description} objects or "name — description" strings. Writes to
+    the live DOINg.AI.
     """, {"type": "object", "properties": {
         "name": _STRING, "description": _STRING,
         "tools": {"type": "array", "items": {}},
@@ -528,22 +545,28 @@ def register_mcp_server(name: str, description: str, tools: list | None = None, 
     deploy = _pick(deploy_status or "dev", DEPLOY_STATUSES, "deploy_status")
     tool_list = [_tool_entry(t) for t in tools or []]
     tool_list = [t for t in tool_list if t["name"]]
-    with _portfolio().writable("register_mcp_server") as data:
+
+    def change(doc: dict) -> dict:
+        servers = _lists(doc)["mcpServers"]
         now = _now()
-        entry = next((s for s in data["mcpServers"] if (s.get("name") or "").strip().lower() == name.lower()), None)
+        entry = next((s for s in servers if (s.get("name") or "").strip().lower() == name.lower()), None)
         created = entry is None
         if created:
-            entry = {"id": f"mcp-{uuid4().hex[:8]}", "name": name, "source": "declarative", "isActive": True,
+            entry = {"id": str(uuid4()), "name": name, "source": "declarative", "isActive": True,
                      "scope": "Internal", "createdAt": now}
-            data["mcpServers"].append(entry)
+            if not isinstance(doc.get("mcpServers"), list):
+                doc["mcpServers"] = []
+            doc["mcpServers"].append(entry)
         entry.update({"description": description.strip(), "deployStatus": deploy, "updatedAt": now})
         for key, value in (("tools", tool_list), ("category", category.strip()), ("teamIT", team_it.strip()),
                            ("useCase", use_case.strip()), ("dataSourceUsed", data_source.strip()),
                            ("tags", [str(t).strip() for t in tags or [] if str(t).strip()])):
             if value or created:
                 entry[key] = value
-        view = _server_view(entry)
-    return {"ok": True, "created": created, "server": view}
+        return {"created": created, "server": _server_view(strip_secrets(entry))}
+
+    answer, merged = _doing_ai().write("register_mcp_server", change)
+    return {"ok": True, **answer, "merged": merged}
 
 
 def _tool_entry(item: Any) -> dict:
@@ -554,265 +577,25 @@ def _tool_entry(item: Any) -> dict:
     return {"name": name.strip().strip("`"), "description": desc.strip()}
 
 
-def _audit(action: str, details: str, user: dict | None) -> dict:
-    return {"id": f"aud-{uuid4().hex[:8]}", "date": _now(), "userId": (user or {}).get("id", ""),
-            "userName": _full_name(user) if user else "DOINg.AI Factory", "action": action, "details": details}
-
-
-# ---------------------------------------------------------------------------
-# Seed: a coherent corporate & investment bank portfolio
-# ---------------------------------------------------------------------------
-
-def _user(uid: str, first: str, last: str, team: str, title: str, role: str, color: str, created: str) -> dict:
-    handle = _ascii(f"{first}.{last}".lower())   # accents folded, as in the bank's directory
-    return {"id": f"u-{uid}", "uid": handle, "firstName": first, "lastName": last, "email": f"{handle}@doing.ai",
-            "team": team, "functionTitle": title, "role": role, "avatarColor": color, "createdAt": created}
-
-
-def _server(sid: str, name: str, description: str, tools: list[tuple[str, str]], *, category: str, tags: list[str],
-            team: str, deploy: str, use_case: str, source: str, data_scope: str, user_teams: list[str],
-            created: str, active: bool = True) -> dict:
-    return {"id": f"mcp-{sid}", "name": name, "description": description, "source": "declarative",
-            "tools": [{"name": n, "description": d} for n, d in tools], "category": category, "tags": tags,
-            "isActive": active, "scope": "Internal", "originData": "Internal system", "dataScope": data_scope,
-            "dataSourceUsed": source, "useCase": use_case, "teamIT": team, "userTeams": user_teams,
-            "deployStatus": deploy, "createdAt": created, "updatedAt": created}
-
-
-def _project(pid: str, name: str, description: str, context: str, *, status: str, dev: str, bu: str, sponsor: str,
-             manager: str, servers: list[str], tags: list[str], start: str, deadline: str, created: str,
-             updated: str, notes: str = "", important: bool = False, members: list[tuple[str, str]] = ()) -> dict:
-    return {"id": pid, "name": name, "description": description, "context": context, "notes": notes,
-            "status": status, "devStatus": dev, "managerId": manager, "sponsorId": sponsor, "businessUnitId": bu,
-            "startDate": start, "deadline": deadline, "isImportant": important, "isArchived": False,
-            "confidentiality": "internal", "members": [{"userId": u, "role": r} for u, r in members],
-            "tasks": [], "milestones": [], "technologyIds": [], "repoIds": [], "mcpServerIds": servers,
-            "agentIds": [], "dataFeedIds": [], "tags": tags, "auditLog": [], "dependsOnProjectIds": [],
-            "createdAt": created, "updatedAt": updated}
-
-
-def seed_state() -> dict:
-    """The sandbox world on first run.
-
-    Built so the Factory's reference flow has something real to find: the two 'Planning' use
-    cases describe 6 and 5 data capabilities; the catalog covers some (Payments Hub, Market
-    Data, Client 360, Teams Notifier, Credit Risk Limits, Document Vault) and lacks others
-    (nostro balances, treasury liquidity history, Loan IQ covenants, financial spreading).
-    """
-    units = [
-        {"id": "bu-gm", "name": "Global Markets", "description": "Sales, trading and research across FX, rates, credit and equities.", "color": "#FF3E00", "createdAt": "2025-01-06T09:00:00Z"},
-        {"id": "bu-gb", "name": "Global Banking", "description": "Corporate lending, coverage and advisory.", "color": "#0EA5E9", "createdAt": "2025-01-06T09:00:00Z"},
-        {"id": "bu-tb", "name": "Transaction Banking", "description": "Payments, cash management, treasury services and trade finance.", "color": "#10B981", "createdAt": "2025-01-06T09:00:00Z"},
-        {"id": "bu-rc", "name": "Risk & Compliance", "description": "Market, credit and liquidity risk; KYC, AML and surveillance.", "color": "#8B5CF6", "createdAt": "2025-01-06T09:00:00Z"},
-        {"id": "bu-ot", "name": "Operations & Technology", "description": "Middle and back office, IT and data platforms.", "color": "#F59E0B", "createdAt": "2025-01-06T09:00:00Z"},
-    ]
-    users = [
-        _user("alice", "Alice", "Martin", "Global Banking — Corporate Lending", "Managing Director, Corporate Lending", "manager", "#FF3E00", "2025-02-03T09:00:00Z"),
-        _user("paul", "Paul", "Durand", "AI Delivery Office", "AI Product Manager", "manager", "#0EA5E9", "2025-02-03T09:00:00Z"),
-        _user("henri", "Henri", "Dubois", "Transaction Banking — Treasury Services", "Head of Liquidity Management", "manager", "#10B981", "2025-03-10T09:00:00Z"),
-        _user("julia", "Julia", "Weber", "Risk — Market Risk", "Head of Market Risk Analytics", "manager", "#8B5CF6", "2025-03-10T09:00:00Z"),
-        _user("marc", "Marc", "Lefèvre", "Global Markets — Equity Derivatives", "Head of Equity Derivatives Trading", "contributor", "#F43F5E", "2025-04-14T09:00:00Z"),
-        _user("nadia", "Nadia", "Haddad", "Operations — Markets Middle Office", "COO, Global Markets Operations", "manager", "#F59E0B", "2025-04-14T09:00:00Z"),
-        _user("thomas", "Thomas", "Klein", "AI Delivery Office", "Product Manager, Data & AI", "contributor", "#14B8A6", "2025-05-05T09:00:00Z"),
-        _user("ines", "Inès", "Garcia", "Compliance — KYC", "KYC Transformation Lead", "contributor", "#EC4899", "2025-05-05T09:00:00Z"),
-    ]
-    servers = [
-        _server("market-data", "Market Data MCP",
-                "Market data for pricing and risk: FX spot and forward rates, interest-rate curves, equity and bond prices, with historical fixings.",
-                [("get_fx_rate", "Latest FX spot rate for a currency pair (e.g. EURUSD) with timestamp and source."),
-                 ("get_fx_history", "Daily FX fixings for a currency pair over a date range."),
-                 ("get_yield_curve", "Interest-rate curve (OIS, government) for a currency and date."),
-                 ("get_price", "Latest price of an equity, bond or index by ISIN or ticker.")],
-                category="Market Data", tags=["fx", "rates", "prices", "market data", "bloomberg"],
-                team="Market Data Engineering", deploy="production",
-                use_case="Pricing, risk and treasury agents that need reference market prices.",
-                source="Bloomberg B-PIPE, Refinitiv RDP", data_scope="Global",
-                user_teams=["Global Markets", "Market Risk", "Treasury"], created="2025-06-02T08:00:00Z"),
-        _server("client-360", "Client 360 MCP",
-                "Golden record of corporate and institutional clients: legal entity data (LEI), group hierarchy, segment, coverage team and KYC status summary.",
-                [("search_clients", "Find clients by name, LEI or internal id."),
-                 ("get_client_profile", "Legal entity profile: LEI, country, segment, rating summary, KYC status."),
-                 ("get_group_hierarchy", "Parent and subsidiaries of a client group."),
-                 ("get_coverage_team", "Relationship manager and coverage bankers of a client.")],
-                category="Client Data", tags=["client", "counterparty", "static data", "lei", "golden record", "crm"],
-                team="Client Data Platform", deploy="production",
-                use_case="Any agent that needs to identify a client and its group.",
-                source="Salesforce Financial Services Cloud, MDM golden record", data_scope="Global",
-                user_teams=["Global Banking", "Compliance", "Operations"], created="2025-05-12T08:00:00Z"),
-        _server("payments-hub", "Payments Hub MCP",
-                "Payments processed by the payments hub: individual payment search, status tracking and aggregated intraday flows per currency, account and settlement system (TARGET2, CHAPS, Fedwire).",
-                [("search_payments", "Search payments by reference, amount, counterparty or date."),
-                 ("get_payment_status", "Status and processing history of one payment (pacs.002)."),
-                 ("get_intraday_flows", "Incoming and outgoing payment flows aggregated per currency and settlement system over a time window.")],
-                category="Payments", tags=["payments", "swift", "iso 20022", "cash", "settlement"],
-                team="Payments IT", deploy="production",
-                use_case="Payment investigations and cash-flow monitoring.",
-                source="Payments Hub (ISO 20022), SWIFT Alliance Access", data_scope="EMEA, Americas",
-                user_teams=["Transaction Banking", "Operations"], created="2025-07-21T08:00:00Z"),
-        _server("credit-risk", "Credit Risk Limits MCP",
-                "Counterparty credit risk: internal ratings, approved limits, current exposure and limit utilisation per client.",
-                [("get_internal_rating", "Internal rating and probability of default of a client, with rating date."),
-                 ("get_limits", "Approved credit limits of a client by product and tenor."),
-                 ("get_exposure", "Current exposure and limit utilisation of a client."),
-                 ("list_limit_breaches", "Open limit breaches, optionally for one client.")],
-                category="Risk", tags=["credit", "risk", "limits", "rating", "exposure"],
-                team="Risk IT", deploy="production",
-                use_case="Credit analysts and lending agents checking headroom before a deal.",
-                source="Credit risk engine, internal rating system", data_scope="Global",
-                user_teams=["Global Banking", "Credit Risk"], created="2025-08-04T08:00:00Z"),
-        _server("doc-vault", "Document Vault MCP",
-                "Search and read documents stored in the enterprise content management system: facility agreements, ISDA/CSA, KYC documents and policies, with clause extraction.",
-                [("search_documents", "Full-text and metadata search across stored documents."),
-                 ("get_document", "Text and metadata of one document."),
-                 ("extract_clauses", "Extract named clauses (e.g. governing law, termination events, guarantees) from a document as text.")],
-                category="Documents", tags=["documents", "contracts", "ecm", "clauses", "ocr"],
-                team="Enterprise Content IT", deploy="production",
-                use_case="Agents that need to quote contractual documents.",
-                source="OpenText Documentum", data_scope="Global",
-                user_teams=["Global Banking", "Legal", "Compliance"], created="2025-06-16T08:00:00Z"),
-        _server("kyc-registry", "KYC Registry MCP",
-                "Client due-diligence files from the client lifecycle management platform: KYC status, risk rating, ultimate beneficial owners and periodic review due dates.",
-                [("get_kyc_file", "KYC file of a client: status, risk rating, documents on file."),
-                 ("list_reviews_due", "Clients whose periodic KYC review is due in a period."),
-                 ("get_ubo_structure", "Ultimate beneficial owners and ownership chain of a client.")],
-                category="Compliance", tags=["kyc", "aml", "ubo", "due diligence", "compliance"],
-                team="Compliance IT", deploy="uat",
-                use_case="KYC periodic review and onboarding agents.",
-                source="Fenergo CLM", data_scope="EMEA", user_teams=["Compliance"], created="2026-02-09T08:00:00Z"),
-        _server("sanctions", "Sanctions Screening MCP",
-                "Screen names and entities against sanctions and PEP lists (OFAC, EU, UN, HMT) and retrieve screening alerts.",
-                [("screen_entity", "Screen a person or company name against sanctions and PEP lists."),
-                 ("get_alert", "Details and disposition of one screening alert."),
-                 ("list_open_alerts", "Open screening alerts, optionally for one client.")],
-                category="Compliance", tags=["sanctions", "pep", "aml", "screening", "compliance"],
-                team="Compliance IT", deploy="production",
-                use_case="Onboarding, payments and KYC agents.",
-                source="Dow Jones Risk & Compliance lists, internal screening engine", data_scope="Global",
-                user_teams=["Compliance", "Transaction Banking"], created="2025-09-15T08:00:00Z"),
-        _server("trade-repository", "Trade Repository MCP",
-                "Booked trades of Global Markets (FX, rates, credit, equity derivatives): trade details, lifecycle events and confirmation status.",
-                [("search_trades", "Search trades by counterparty, product, trade date or book."),
-                 ("get_trade", "Economic details and lifecycle events of one trade."),
-                 ("get_confirmation_status", "Confirmation matching status of a trade.")],
-                category="Trading", tags=["trades", "post-trade", "confirmations", "murex"],
-                team="Markets IT", deploy="production",
-                use_case="Post-trade, risk and client-service agents.",
-                source="Murex MX.3 trade store", data_scope="Global",
-                user_teams=["Global Markets", "Operations"], created="2025-04-28T08:00:00Z"),
-        _server("teams-notifier", "Teams Notifier MCP",
-                "Post messages and alerts to Microsoft Teams channels and chats, with adaptive cards and mentions.",
-                [("post_channel_message", "Post a message or adaptive card to a Teams channel."),
-                 ("send_chat_message", "Send a direct message to a user."),
-                 ("list_channels", "Channels of a team the server may post to.")],
-                category="Productivity", tags=["teams", "notification", "alerts", "collaboration"],
-                team="Workplace IT", deploy="production",
-                use_case="Any agent that must alert a desk or a person.",
-                source="Microsoft Graph API", data_scope="Global",
-                user_teams=["All"], created="2025-03-31T08:00:00Z"),
-        _server("research-library", "Research Library MCP",
-                "Search the published equity and credit research: reports, analyst recommendations and target prices.",
-                [("search_research", "Search published research by issuer, sector or keyword."),
-                 ("get_report", "Summary and full text of a research report.")],
-                category="Knowledge", tags=["research", "equity", "credit research", "reports"],
-                team="Markets IT", deploy="dev",
-                use_case="Sales assistants answering client questions on published research.",
-                source="Research portal (BlueMatrix)", data_scope="Global",
-                user_teams=["Global Markets"], created="2026-08-24T08:00:00Z"),
-    ]
-    projects = [
-        _project("prj-1001", "Trade Confirmation Matching Assistant",
-                 "Reads incoming FX and money-market confirmations (SWIFT MT300/MT320 and broker PDFs), matches them against booked trades and drafts the exception e-mail for unmatched fields.",
-                 "Middle office matched ~4,000 confirmations a day by hand. The assistant reads confirmations from the document vault, compares economics with the trade repository and posts exceptions to the operations Teams channel.",
-                 status="Done", dev="prod", bu="bu-ot", sponsor="u-nadia", manager="u-thomas",
-                 servers=["mcp-trade-repository", "mcp-doc-vault", "mcp-teams-notifier"],
-                 tags=["operations", "post-trade", "genai"], start="2025-10-06", deadline="2026-03-31",
-                 created="2025-10-02T10:12:00Z", updated="2026-04-02T16:40:00Z",
-                 notes="Live since March 2026: 72% of confirmations auto-matched, 3 FTE redeployed to exception handling.",
-                 members=[("u-thomas", "Owner"), ("u-nadia", "Contributor")]),
-        _project("prj-1002", "KYC Periodic Review Copilot",
-                 "Prepares the periodic KYC review file of a corporate client: refreshes ownership, screens the group again and drafts the analyst's review note.",
-                 "1,200 periodic reviews are overdue in EMEA. The copilot gathers the KYC file, UBO chain, screening alerts and stored documents, then drafts the review for the analyst to validate.",
-                 status="Active", dev="uat", bu="bu-rc", sponsor="u-ines", manager="u-thomas",
-                 servers=["mcp-kyc-registry", "mcp-sanctions", "mcp-doc-vault", "mcp-client-360"],
-                 tags=["kyc", "aml", "compliance", "copilot"], start="2026-02-02", deadline="2026-12-15",
-                 created="2026-01-19T09:30:00Z", updated="2026-09-29T14:05:00Z", important=True,
-                 notes="UAT with 6 analysts since September; target 40% shorter review time.",
-                 members=[("u-thomas", "Owner"), ("u-ines", "Lead")]),
-        _project("prj-1003", "Credit Memo Drafting Assistant",
-                 "Drafts the first version of the credit memo for a new facility: client profile, group structure, rating and limits, market context.",
-                 "Bankers spend two days per memo collecting data from five systems. The assistant assembles client data, internal rating, limits and exposure and recent market data, then drafts the memo sections.",
-                 status="Active", dev="dev", bu="bu-gb", sponsor="u-alice", manager="u-paul",
-                 servers=["mcp-credit-risk", "mcp-client-360", "mcp-doc-vault", "mcp-market-data"],
-                 tags=["lending", "credit", "genai"], start="2026-05-04", deadline="2027-01-29",
-                 created="2026-04-21T11:00:00Z", updated="2026-10-02T09:15:00Z",
-                 members=[("u-paul", "Owner"), ("u-alice", "Contributor")]),
-        _project("prj-1004", "Market Risk Limit Breach Explainer",
-                 "Explains overnight market-risk limit breaches in plain English for the desk heads: positions driving the breach, market moves, suggested hedges.",
-                 "Each morning risk managers write 10-20 breach explanations. The explainer reads trades and market moves and posts a draft to the risk Teams channel.",
-                 status="Done", dev="prod", bu="bu-rc", sponsor="u-julia", manager="u-paul",
-                 servers=["mcp-market-data", "mcp-trade-repository", "mcp-teams-notifier"],
-                 tags=["market risk", "limits", "genai"], start="2025-09-01", deadline="2026-02-27",
-                 created="2025-08-25T08:45:00Z", updated="2026-03-06T17:20:00Z",
-                 notes="In production since February 2026; explanations reviewed in 5 minutes instead of 40.",
-                 members=[("u-paul", "Owner"), ("u-julia", "Contributor")]),
-        _project("prj-1005", "Intraday Liquidity Forecasting Agent",
-                 "An agent that forecasts the bank's intraday liquidity position per currency every 15 minutes and alerts the Treasury desk before the liquidity buffer is breached.",
-                 "Treasury Services monitors EUR, USD and GBP intraday liquidity by hand today, from four screens and a spreadsheet. The agent must:\n"
-                 "- read real-time incoming and outgoing payment flows per currency and settlement system (TARGET2, CHAPS, Fedwire) from the Payments Hub;\n"
-                 "- read the current balances of our nostro accounts at correspondent banks — today only available as end-of-day MT940/MT950 statements and a Treasury spreadsheet, with no API;\n"
-                 "- convert positions to EUR with live FX spot rates;\n"
-                 "- learn intraday patterns from 24 months of historical liquidity positions kept in the Treasury data warehouse (Oracle) — no service exposes them yet;\n"
-                 "- identify the counterparties driving the largest outflows from client static data;\n"
-                 "- alert the Treasury desk channel in Microsoft Teams when the forecast buffer drops below the internal threshold.\n"
-                 "Regulatory driver: BCBS 248 intraday liquidity monitoring; the supervisor expects an improvement plan by Q1 2027.",
-                 status="Planning", dev="to_start", bu="bu-tb", sponsor="u-henri", manager="u-paul",
-                 servers=[], tags=["treasury", "liquidity", "agent", "regulatory"], start="2026-11-02",
-                 deadline="2027-03-31", created="2026-10-08T07:55:00Z", updated="2026-10-08T07:55:00Z",
-                 important=True,
-                 notes="Expected benefits: 2 FTE of manual monitoring saved; buffer breaches anticipated 60 minutes ahead; evidence for the BCBS 248 remediation plan.",
-                 members=[("u-paul", "Owner"), ("u-henri", "Contributor")]),
-        _project("prj-1006", "Corporate Loan Covenant Monitoring",
-                 "Monitors the financial covenants of the corporate loan book every quarter and drafts a waiver or early-warning memo for the relationship manager when a covenant is at risk.",
-                 "About 1,800 bilateral and syndicated facilities carry financial covenants (leverage, interest cover, minimum liquidity). Credit officers check them by hand when borrowers send their quarterly accounts, often weeks late. The agent must:\n"
-                 "- retrieve the facility agreements and covenant clauses from the Document Vault (Documentum);\n"
-                 "- read the covenant definitions, thresholds and test dates of each facility from Loan IQ, our loan servicing system — no API is exposed to agents yet;\n"
-                 "- get the borrower's spread financial statements (EBITDA, net debt, interest expense) from the credit spreading tool, Moody's CreditLens — no MCP server or service is available today;\n"
-                 "- check the internal rating, limits and current exposure from the credit risk engine;\n"
-                 "- use the client golden record (group structure, relationship manager) from Client 360.\n"
-                 "It then computes covenant headroom and drafts the memo. Pilot on the EMEA mid-cap portfolio.",
-                 status="Planning", dev="to_start", bu="bu-gb", sponsor="u-alice", manager="u-thomas",
-                 servers=[], tags=["lending", "covenants", "agent", "credit"], start="2026-11-16",
-                 deadline="2027-04-30", created="2026-10-09T14:20:00Z", updated="2026-10-09T14:20:00Z",
-                 notes="Expected benefits: breaches detected at the reporting date instead of 6-8 weeks later; about 1,500 analyst hours saved per year.",
-                 members=[("u-thomas", "Owner"), ("u-alice", "Contributor")]),
-    ]
-    wishes = [
-        {"id": "wish-01", "title": "MCP server for Loan IQ facility and covenant data",
-         "description": "Credit officers and agents need read access to facility terms, covenant definitions, thresholds and test dates held in Loan IQ.",
-         "category": "mcp", "businessJustification": "Covenant data is locked in Loan IQ screens; every credit agent use case needs it.",
-         "expectedImpact": "Unblocks covenant monitoring and credit memo automation.",
-         "requesterId": "u-thomas", "sponsorId": "u-alice", "relatedProjectId": "prj-1006",
-         "status": "under_review", "priority": "high", "wishedDate": "2027-01-31", "comments": [],
-         "tags": ["lending", "loan iq", "mcp"], "createdAt": "2026-09-22T10:00:00Z", "updatedAt": "2026-10-01T08:30:00Z"},
-        {"id": "wish-02", "title": "Earnings call summariser for equity sales",
-         "description": "Summarise earnings calls of covered issuers within an hour of the call, with the questions analysts asked.",
-         "category": "agent", "businessJustification": "Sales want faster client follow-ups after results.",
-         "expectedImpact": "Same-day client notes on 300 issuers.", "requesterId": "u-marc", "sponsorName": "Equity Sales",
-         "status": "submitted", "priority": "medium", "comments": [], "tags": ["equity", "research", "agent"],
-         "createdAt": "2026-09-30T15:10:00Z", "updatedAt": "2026-09-30T15:10:00Z"},
-        {"id": "wish-03", "title": "Intraday nostro balances feed for Treasury",
-         "description": "A feed of nostro account balances at correspondent banks, refreshed during the day, for liquidity monitoring.",
-         "category": "datafeed", "businessJustification": "Treasury only sees end-of-day MT950 statements today.",
-         "expectedImpact": "Intraday view of cash at correspondents.", "requesterId": "u-henri", "sponsorId": "u-henri",
-         "relatedProjectId": "prj-1005", "status": "accepted", "priority": "high", "comments": [],
-         "tags": ["treasury", "nostro", "liquidity"], "createdAt": "2026-08-18T09:40:00Z", "updatedAt": "2026-09-12T11:00:00Z"},
-    ]
-    return {"businessUnits": units, "users": users, "projects": projects, "mcpServers": servers, "wishes": wishes,
-            "lastUpdated": _now()}
+def _audit(action: str, details: str) -> dict:
+    return {"id": str(uuid4()), "date": _now(), "userId": "", "userName": ACTOR, "action": action, "details": details}
 
 
 def main() -> None:
-    _portfolio()   # fail fast on a bad DOING_AI_MODE, before the client's initialize
+    """Refuse to start without a DOINg.AI to talk to — before the client's initialize, so a
+    connector test says why instead of listing tools that cannot work."""
+    try:
+        client = _doing_ai()
+        version = client._call("GET", "/api/version")
+        if not isinstance(version, dict) or "lastUpdated" not in version:
+            raise ToolError(f"{client.url}/api/version did not answer like DOINg.AI ({str(version)[:120]}). "
+                            "Is DOING_AI_URL the DOINg.AI backend (port 3001 by default)?")
+    except SystemExit as exc:
+        print(f"DOINg.AI MCP server not started: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None
+    except ToolError as exc:
+        print(f"DOINg.AI MCP server not started: {exc.payload['error']}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None
     server.run()
 
 

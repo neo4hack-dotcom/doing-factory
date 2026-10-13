@@ -1,33 +1,36 @@
-"""Seed data (app/seed): roles, compliance rules, builtin blueprints and the demo environment.
+"""Seed data (app/seed): roles, compliance rules, builtin blueprints and the standard setup of
+connectors.
 
-The builtin blueprints are the product demo, so they are held to the data contract (models.py),
-their templates must compile and render (SPEC §4 semantics, checked with a Jinja environment
-of our own so the seed is verified independently of the engine), every value a step reads
-must be produced by an earlier step in the shape it reads it, and the operations they call
-must work against the bundled sandbox MCP servers for real.
+The builtin blueprints are held to the data contract (models.py), their templates must
+compile and render (SPEC §4 semantics, checked with a Jinja environment of our own so the seed
+is verified independently of the engine), every value a step reads must be produced by an
+earlier step in the shape it reads it, and the standard operations they call must work over
+MCP for real: against the real DOINg.AI MCP server (talking to a DOINg.AI backend double) and
+an mcp-atlassian double with the real tool names and argument shapes.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-import sys
-from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
-from jinja2 import ChainableUndefined, StrictUndefined
+from jinja2 import ChainableUndefined, StrictUndefined, Undefined
 from jinja2.sandbox import SandboxedEnvironment
 
+from app.errors import FactoryError
 from app.llm.prompts import DEFAULT_PROMPTS
-from app.models import STEP_CONFIG_MODELS, Blueprint, Connector, Estimate, Operation, RoleDef, Rule, Team, User, Watcher
+from app.models import STEP_CONFIG_MODELS, Blueprint, Estimate, Operation, RoleDef, Rule, Watcher
 from app.seed import defaults
 from app.seed.defaults import BUILTIN_BLUEPRINTS, PORTFOLIO_AGENT_TOOLS, ROLES, RULES, seed_defaults
-from app.seed.demo import (DEMO_TEAMS, DEMO_USERS, JIRA_CONNECTOR, MCP_SERVERS_DIR, PORTFOLIO_CONNECTOR,
-                           WATCHER_NAME, demo_operations, demo_watcher, install_demo)
+from app.seed.standard_ops import WATCHER_NAME, jira_operations, new_use_cases_watcher, portfolio_operations, standard_setup
+from tests.fixtures.factory_env import JIRA_CONNECTOR, TEST_TEAMS, install_test_env
+from tests.fixtures.fake_doing_ai import FakeDoingAI
 
 BLUEPRINTS = {bp["key"]: bp for bp in BUILTIN_BLUEPRINTS}
-OPERATIONS = {op["key"]: op for op in demo_operations()}
+OPERATIONS = {**{op["key"]: {**op, "connector": "portfolio"} for op in portfolio_operations()},
+              **{op["key"]: {**op, "connector": "jira"} for op in jira_operations()}}
 ROLE_KEYS = {r["key"] for r in ROLES}
 
 # ---------------------------------------------------------------------------
@@ -44,9 +47,13 @@ def _bullets(value: Any) -> str:
     return value if isinstance(value, str) else "\n".join(f"- {v}" for v in value or [])
 
 
+def _compact(value: Any) -> Any:
+    return {k: v for k, v in value.items() if not (v is None or isinstance(v, Undefined) or v in ("", [], {}))}
+
+
 def _env(undefined: type) -> SandboxedEnvironment:
     env = SandboxedEnvironment(undefined=undefined, autoescape=False)
-    env.filters.update(tojson=lambda v: json.dumps(v, ensure_ascii=False, default=str), bullets=_bullets,
+    env.filters.update(tojson=lambda v: json.dumps(v, ensure_ascii=False, default=str), bullets=_bullets, compact=_compact,
                        truncate_chars=_truncate_chars, slug=lambda v: re.sub(r"[^a-z0-9]+", "-", str(v).lower()).strip("-"))
     return env
 
@@ -243,7 +250,7 @@ def test_jinja_compiles_everywhere():
             LENIENT.from_string(text)
         if op["output"]["extract"]:
             LENIENT.compile_expression(op["output"]["extract"])
-    watcher = demo_watcher("bp_x")
+    watcher = new_use_cases_watcher("bp_x")
     for text in watcher["mapping"].values():
         LENIENT.from_string(text)
     for expr in (watcher["items_expr"], watcher["filter"]):
@@ -255,7 +262,7 @@ def test_jinja_compiles_everywhere():
 # ---------------------------------------------------------------------------
 
 TEAMS = [{"id": f"team_{t['jira_project_key'].lower()}", "name": t["name"], "description": t["description"],
-          "skills": t["skills"], "jira_project_key": t["jira_project_key"], "jira_component": ""} for t in DEMO_TEAMS]
+          "skills": t["skills"], "jira_project_key": t["jira_project_key"], "jira_component": ""} for t in TEST_TEAMS]
 
 SAMPLES: dict[str, dict[str, Any]] = {
     "use_case_onboarding": {
@@ -288,7 +295,8 @@ SAMPLES: dict[str, dict[str, Any]] = {
     "mcp_delivery": {
         "inputs": {"mcp_name": "Nostro Balances MCP", "purpose": "Intraday nostro balances for Treasury agents.",
                    "capability": "nostro account balances", "data_source": "MT940/MT950 statements",
-                   "suggested_team": "Payments", "parent_use_case": "UC-0001 — Intraday Liquidity Forecasting Agent"},
+                   "suggested_team": "Payments", "parent_use_case": "UC-0001 — Intraday Liquidity Forecasting Agent",
+                   "change_project_key": ""},
         "vars": {
             "spec": {"summary": "Read-only nostro balances.", "tools": ["get_nostro_balances — balance per account",
                                                                         "list_nostro_accounts — accounts"],
@@ -296,7 +304,7 @@ SAMPLES: dict[str, dict[str, Any]] = {
                      "auth_model": "Service account (read-only)", "consumers": "Liquidity agent", "nfr": "p95 < 1 s",
                      "acceptance_criteria": "Balances match the MT950 closing balance", "target_date": "2027-01-31"},
             "routing": {"team_id": "team_pay", "team_name": "Payments", "jira_project_key": "PAY", "rationale": "Owns nostro data."},
-            "epic": {"key": "PAY-31", "url": "https://jira.sandbox.local/browse/PAY-31", "created": False, "project_key": "PAY"},
+            "epic": {"key": "PAY-31", "url": "https://jira.example.test/browse/PAY-31", "created": False, "project_key": "PAY"},
             "spec_signoff": {"decision": "approved", "approvals": []},
             "estimate": {"value": 8, "unit": "days", "confidence": "medium", "breakdown": [{"item": "tools", "value": 8}],
                          "rationale": "r", "submitted_by": "usr_1", "ai_suggestion": None},
@@ -307,14 +315,15 @@ SAMPLES: dict[str, dict[str, Any]] = {
                 {"project_key": "PAY", "summary": "Add audit logging of tool calls", "issue_type": "Story",
                  "description": "### Context\nAs a security officer…", "parent_key": "PAY-31", "story_points": 2,
                  "labels": ["mcp", "audit"]}]},
-            "jira_stories": {"ok": True, "count": 2, "keys": ["PAY-32", "PAY-33"], "created": []},
+            "jira_stories": [{"key": "PAY-32"}, {"key": "PAY-33"}],
             "test_plan": {"markdown": "### Test cases\n| TC-01 | … |"},
-            "development": {"key": "PAY-31", "status": "Done"},
+            "development": {"key": "PAY-31", "status": {"name": "Done", "category": "Done"}},
             "gate": {"passed": True, "checks": [], "failed": [], "overridden": False},
             "test_report": {"tests_total": 24, "tests_passed": 24, "open_defects": 0, "report": "All green.",
                             "evidence_url": "https://ci.bank.example/run/1", "ready_for_release": True},
             "release_notes": {"markdown": "### Summary\nv1.0"},
-            "change": {"key": "OPS-42", "url": "https://jira.sandbox.local/browse/OPS-42", "summary": "Production release"},
+            "change": {"key": "OPS-42", "url": "https://jira.example.test/rest/api/2/issue/10042",
+                       "browse_url": "https://jira.example.test/browse/OPS-42", "summary": "Production release"},
             "release_approval": {"decision": "approved", "approvals": []},
             "registration": {"ok": True, "created": True, "server": {"id": "mcp-1a2b3c4d", "name": "Nostro Balances MCP"}},
             "delivered": {"subject": "s", "recipients": []},
@@ -420,10 +429,17 @@ def test_conditions():
     assert children["parent_use_case"] == "UC-0001 — Corporate Loan Covenant Monitoring"
     until = next(st for _, st in steps(BLUEPRINTS["mcp_delivery"]) if st["type"] == "wait_for")["config"]["until"]
     assert evaluate(until, {"output": {"status": "Done"}}) and not evaluate(until, {"output": {"status": "In Progress"}})
+    # mcp-atlassian: status {name, category} — any status of the Done category completes the step
+    assert evaluate(until, {"output": {"status": {"name": "Closed", "category": "Done"}}}, STRICT)
+    assert not evaluate(until, {"output": {"status": {"name": "In Review", "category": "In Progress"}}}, STRICT)
+    change = next(st for _, st in steps(BLUEPRINTS["mcp_delivery"]) if st["id"] == "change_ticket")["config"]["input"]
+    ctx = full_context("mcp_delivery")
+    assert render_obj(change, ctx, STRICT)["project_key"] == "PAY"   # no change project set: the delivery team's
+    assert render_obj(change, {**ctx, "inputs": {**ctx["inputs"], "change_project_key": "OPS"}}, STRICT)["project_key"] == "OPS"
 
 
 # ---------------------------------------------------------------------------
-# Seeding and the demo installer
+# Seeding and the standard setup of connectors
 # ---------------------------------------------------------------------------
 
 def test_seed_defaults_adds_only_what_is_missing(container):
@@ -452,47 +468,34 @@ def test_seed_defaults_adds_only_what_is_missing(container):
 
 
 @pytest.fixture
-def demo(container, tmp_path, monkeypatch):
-    monkeypatch.setattr(container.settings, "data_dir", str(tmp_path / "data"))
-    first = install_demo(container)
-    yield container, first
-    asyncio.run(container.mcp.close_all())
+def configured(container, tmp_path):
+    """A DOINg.AI backend double, and the Factory configured as an admin would against it."""
+    with FakeDoingAI() as doing_ai:
+        env = install_test_env(container, doing_ai_url=doing_ai.url, jira_state=tmp_path / "jira.json")
+        yield container, env, doing_ai
+        asyncio.run(container.mcp.close_all())
 
 
-def test_install_demo_is_complete_and_idempotent(demo):
-    container, first = demo
+def test_standard_setup_is_complete_and_idempotent(configured):
+    container, env, _ = configured
     store = container.store
-    assert first == {"created": {"users": len(DEMO_USERS), "teams": len(DEMO_TEAMS), "connectors": 2,
-                                 "operations": len(OPERATIONS), "watchers": 1}}
-    assert install_demo(container) == {"created": {"users": 0, "teams": 0, "connectors": 0, "operations": 0, "watchers": 0}}
-
-    users = {u["email"]: User.model_validate(u) for u in store.list("users")}
-    assert set(users) == {u["email"] for u in DEMO_USERS}
-    assert {r for u in users.values() for r in u.roles} == ROLE_KEYS - {"business_user"}
-    teams = {t["name"]: Team.model_validate(t) for t in store.list("teams")}
-    assert {t.jira_project_key for t in teams.values()} == {"MCPF", "DATA", "PAY", "SEC", "OPS"}
-    sofia = users["sofia.rossi@doing.ai"]
-    assert teams["MCP Factory Squad"].lead_user_id == sofia.id and teams["MCP Factory Squad"].id in sofia.team_ids
-    assert all(t.skills and t.lead_user_id and t.member_ids for t in teams.values())
-
-    connectors = {c["name"]: Connector.model_validate(c) for c in store.list("connectors")}
-    sandbox_dir = Path(container.settings.data_path) / "sandbox"
-    for name, script, kind in ((PORTFOLIO_CONNECTOR, "doing_ai_mcp.py", "portfolio"), (JIRA_CONNECTOR, "jira_mcp.py", "jira")):
-        con = connectors[name]
-        assert con.transport == "stdio" and con.command == sys.executable and con.sandbox and con.kind == kind
-        assert con.args == [str(MCP_SERVERS_DIR / script)] and Path(con.args[0]).is_file()
-        assert all(Path(v).parent == sandbox_dir for k, v in con.env.items() if k.endswith("STATE"))
-    assert connectors[PORTFOLIO_CONNECTOR].slug == defaults.PORTFOLIO_SANDBOX_SLUG
+    portfolio_keys = [op["key"] for op in portfolio_operations()]
+    jira_keys = [op["key"] for op in jira_operations()]
+    assert env["setup"]["portfolio"]["operations_created"] == portfolio_keys
+    assert env["setup"]["portfolio"]["watcher_created"] is True
+    assert env["setup"]["jira"]["operations_created"] == jira_keys and env["setup"]["jira"]["watcher_created"] is False
+    assert any("Epic Link" in n for n in env["setup"]["jira"]["notes"])
 
     ops = {o["key"]: Operation.model_validate(o) for o in store.list("operations")}
     assert set(ops) == set(OPERATIONS)
-    sensitive = {k for k, o in ops.items() if o.sensitive}
-    assert sensitive == {"portfolio.register_mcp", "portfolio.update_status", "jira.ensure_epic", "jira.create_issue",
-                         "jira.create_stories", "jira.create_change"}
+    assert {k for k, o in ops.items() if o.sensitive} == {
+        "portfolio.register_mcp", "portfolio.update_status", "jira.ensure_epic", "jira.create_issue",
+        "jira.create_stories", "jira.create_change"}
     assert ops["jira.ensure_epic"].mode == "agent" and ops["jira.ensure_epic"].output.json_schema["required"] == [
         "key", "url", "created", "project_key"]
-    assert ops["portfolio.list_projects"].connector_id == connectors[PORTFOLIO_CONNECTOR].id
-    assert ops["jira.create_stories"].connector_id == connectors[JIRA_CONNECTOR].id
+    assert all(ops[k].connector_id == env["portfolio"]["id"] for k in portfolio_keys)
+    assert all(ops[k].connector_id == env["jira"]["id"] for k in jira_keys)
+    assert not any("OPS" in json.dumps(op.args_template) for op in ops.values())   # no hard-coded Jira project
 
     watcher = Watcher.model_validate(next(w for w in store.list("watchers") if w["name"] == WATCHER_NAME))
     assert watcher.operation_key == "portfolio.list_projects" and watcher.input == {"status": "Planning"}
@@ -500,16 +503,36 @@ def test_install_demo_is_complete_and_idempotent(demo):
     assert watcher.blueprint_id == container.get_blueprint_by_key("use_case_onboarding")["id"]
     assert {k.removeprefix("inputs.") for k in watcher.mapping if k.startswith("inputs.")} <= {
         f["key"] for f in BLUEPRINTS["use_case_onboarding"]["inputs"]}
-    assert [e["kind"] for e in store.list_events(kinds=["demo.installed"])] == ["demo.installed"] * 2
+
+    # Again: nothing created, an admin's edit survives.
+    edited = {**store.get("operations", ops["portfolio.list_projects"].id), "name": "Planning use cases (ours)"}
+    store.put("operations", edited)
+    again = standard_setup(container, env["portfolio"]["id"])
+    assert again["operations_created"] == [] and again["operations_existing"] == portfolio_keys
+    assert again["watcher_created"] is False and any("already exists" in n for n in again["notes"])
+    assert store.get("operations", edited["id"])["name"] == "Planning use cases (ours)"
+    assert len(store.list("watchers")) == 1
+
+    # A second Jira connector: the operations stay bound to the first, and the notes say so.
+    other = {**env["jira"], "id": "con_jira2", "name": "Jira 2", "slug": "jira_2"}
+    store.put("connectors", other)
+    second = standard_setup(container, "con_jira2")
+    assert second["operations_created"] == [] and len(second["operations_existing"]) == len(jira_keys)
+    assert all(f"uses '{JIRA_CONNECTOR}'" in n for n in second["notes"][:len(jira_keys)])
+
+    store.put("connectors", {**env["jira"], "id": "con_other", "name": "Notifier", "slug": "notifier", "kind": "other"})
+    with pytest.raises(FactoryError) as err:
+        standard_setup(container, "con_other")
+    assert err.value.status_code == 422
 
 
-def test_demo_operations_work_against_the_sandbox_servers(demo):
-    """Every direct operation runs with its own test input through the Factory's MCP client;
-    the agent operation's tools exist; the builtin blueprints' data hand-offs hold against the
-    real tool outputs (watcher mapping, epic search, story batch, change link, catalog registration)."""
-    container, _ = demo
-    connectors = {c["name"]: c["id"] for c in container.store.list("connectors")}
-    con_of = {"portfolio": connectors[PORTFOLIO_CONNECTOR], "jira": connectors[JIRA_CONNECTOR]}
+def test_standard_operations_work_against_the_real_servers(configured):
+    """Every direct operation with a test input runs through the Factory's MCP client against the
+    real DOINg.AI MCP server (over the DOINg.AI backend double) and the mcp-atlassian double; the
+    builtin blueprints' data hand-offs hold against the real tool outputs (watcher mapping, epic
+    search, story batch, epic wait, change link, catalog registration, portfolio update)."""
+    container, env, doing_ai = configured
+    con_of = {"portfolio": env["portfolio"]["id"], "jira": env["jira"]["id"]}
     by_step = {st["id"]: st for bp in BUILTIN_BLUEPRINTS for _, st in steps(bp)}
 
     async def run_op(key: str, input: dict) -> Any:
@@ -519,6 +542,12 @@ def test_demo_operations_work_against_the_sandbox_servers(demo):
         assert result["ok"], (key, args, result["error"])
         extract = op["output"]["extract"]
         return evaluate(extract, {"result": result["data"]}) if extract else result["data"]
+
+    async def engine_op(key: str, input: dict) -> Any:
+        """Through the Factory's own operation executor (its Jinja environment, its argument typing)."""
+        result = await container.ops.run(key, input)
+        assert result.ok, (key, result.error)
+        return result.output
 
     async def scenario() -> None:
         try:
@@ -532,7 +561,8 @@ def test_demo_operations_work_against_the_sandbox_servers(demo):
             connector = await container.mcp.test(cid)
             assert connector["status"]["ok"], connector["status"]
             tools[kind] = {t["name"]: t for t in connector["tools"]}
-        assert len(tools["portfolio"]) == 9 and len(tools["jira"]) == 8
+        assert set(tools["portfolio"]) == {"list_projects", "get_project", "list_users", "list_wishes", "list_mcp_servers",
+                                           "search_mcp_servers", "update_project_status", "register_mcp_server"}
 
         for key, op in OPERATIONS.items():
             if op["mode"] == "agent":
@@ -541,14 +571,13 @@ def test_demo_operations_work_against_the_sandbox_servers(demo):
             schema = tools[op["connector"]][op["tool"]]["input_schema"]
             assert set(op["args_template"]) <= set(schema["properties"]), key
             assert set(schema.get("required", [])) <= set(op["args_template"]), key
-            assert await run_op(key, op["test_input"]) is not None, key
-        for name in {t.split("__")[-1] for t in PORTFOLIO_AGENT_TOOLS}:
+            if op["test_input"]:
+                assert await run_op(key, op["test_input"]) is not None, key
+        for name in PORTFOLIO_AGENT_TOOLS:
             assert tools["portfolio"][name]["read_only"] and not tools["portfolio"][name]["sensitive"]
-        story_fields = defaults.BACKLOG_SCHEMA["properties"]["issues"]["items"]["properties"]
-        assert set(story_fields) <= set(tools["jira"]["jira_create_issue"]["input_schema"]["properties"])
 
         # Watcher: Planning use cases → intake fields
-        watcher = demo_watcher("bp_use_case_onboarding")
+        watcher = new_use_cases_watcher("bp_use_case_onboarding")
         output = await run_op(watcher["operation_key"], watcher["input"])
         items = [i for i in evaluate(watcher["items_expr"], {"result": output}) if evaluate(watcher["filter"], {"item": i})]
         assert {i[watcher["key_field"]] for i in items} == {"prj-1005", "prj-1006"}
@@ -558,46 +587,69 @@ def test_demo_operations_work_against_the_sandbox_servers(demo):
         assert "Loan IQ" in mapped["prj-1006"]["inputs.context"] and mapped["prj-1006"]["tags"] == ["lending", "covenants", "agent", "credit"]
         assert mapped["prj-1005"]["priority"] == "high" and mapped["prj-1005"]["title"] == "Intraday Liquidity Forecasting Agent"
 
-        # Jira epic: the goal's first search finds the seeded open epic in the routed team project
+        # Jira epic: the goal's first search finds the open epic in the routed team project
         ctx = full_context("mcp_delivery")
         epic_input = render_obj(by_step["jira_epic"]["config"]["input"], ctx, STRICT)
         goal = render(OPERATIONS["jira.ensure_epic"]["prompt"], {"input": epic_input}, STRICT)
         jql = re.search(r"jql: (.+)", goal)[1]
         assert jql == 'project = PAY AND issuetype = Epic AND summary ~ "Nostro Balances MCP"'
-        assert [i["key"] for i in await run_op("jira.search", {"jql": jql})] == ["PAY-31"]
-        assert 'labels ["mcp", "doing-factory"]' in goal
+        found = await run_op("jira.search", {"jql": jql})
+        assert [i["key"] for i in found] == ["PAY-31"] and found[0]["browse_url"].endswith("/browse/PAY-31")
+        assert """additional_fields '{"labels": ["mcp", "doing-factory"]}'""" in goal
         assert "copied exactly:\nRead-only nostro balances.\n\nRequested by: UC-0001 — Intraday Liquidity" in goal
 
-        # Stories: the backlog shape goes through jira.create_stories unchanged
+        # Stories: the backlog becomes one mcp-atlassian batch, linked to the epic, with points
         stories_input = render_obj(by_step["create_stories"]["config"]["input"], ctx, STRICT)
         assert stories_input == {"issues": SAMPLES["mcp_delivery"]["vars"]["jira_backlog"]["issues"]}
-        created = await run_op("jira.create_stories", stories_input)
-        assert created["count"] == 2 and all(i["parent_key"] == "PAY-31" for i in created["created"])
+        batch = json.loads(render_obj(OPERATIONS["jira.create_stories"]["args_template"], {"input": stories_input})["issues"])
+        assert batch[0] == {"project_key": "PAY", "summary": "Implement get_nostro_balances tool", "issue_type": "Story",
+                            "description": "### Context\nAs an agent developer…", "labels": ["mcp", "balances"],
+                            "Epic Link": "PAY-31", "Story Points": 3}
+        created = await engine_op("jira.create_stories", stories_input)
+        assert [i["epic_key"] for i in created] == ["PAY-31", "PAY-31"]
+        assert [i["customfield_10016"]["value"] for i in created] == [3, 2]
 
-        # Development waits on the epic
+        # A single issue with only the required inputs: optional fields are not sent at all
+        lone = await engine_op("jira.create_issue", {"project_key": "MCPF", "summary": "Lone task"})
+        assert lone["issue_type"] == {"name": "Task"} and "labels" not in lone and "parent" not in lone
+        child = await engine_op("jira.create_issue", {"project_key": "PAY", "summary": "Child", "issue_type": "Story",
+                                                      "parent_key": "PAY-31", "labels": ["mcp"], "priority": "High",
+                                                      "components": ["API", "Core"]})
+        assert child["parent"] == {"key": "PAY-31"} and child["priority"] == {"name": "High"}
+        assert child["components"] == ["API", "Core"] and child["labels"] == ["mcp"]
+
+        # Development waits on the epic's status category
         until = by_step["development"]["config"]["until"]
         epic_ctx = render_obj(by_step["development"]["config"]["input"], ctx, STRICT)
         assert not evaluate(until, {"output": await run_op("jira.get_issue", epic_ctx)})
-        await container.mcp.call_tool(con_of["jira"], "jira_transition_issue", {"issue_key": "PAY-31", "status": "Done"})
+        moved = await container.mcp.call_tool(con_of["jira"], "jira_transition_issue",
+                                              {"issue_key": "PAY-31", "transition_id": "Done"})
+        assert moved["ok"], moved
         assert evaluate(until, {"output": await run_op("jira.get_issue", epic_ctx)})
 
-        # Change ticket and its link
-        change = await run_op("jira.create_change", render_obj(by_step["change_ticket"]["config"]["input"], ctx, STRICT))
+        # Change ticket: in the change project when one is set, linked to the issue's page
+        change_ctx = {**ctx, "inputs": {**ctx["inputs"], "change_project_key": "OPS"}}
+        change = await engine_op("jira.create_change", render_obj(by_step["change_ticket"]["config"]["input"], change_ctx, STRICT))
         link = render_obj(by_step["change_ticket"]["config"]["create_link"], {**ctx, "output": change}, STRICT)
-        assert change["issue_type"] == "Change" and change["priority"] == "High"
-        assert link["url"] == f"https://jira.sandbox.local/browse/{change['key']}" and link["external_id"].startswith("OPS-")
+        assert change["issue_type"] == {"name": "Change"} and change["priority"] == {"name": "High"}
+        assert link["url"] == change["browse_url"] and "/browse/OPS-" in link["url"] and link["external_id"].startswith("OPS-")
 
-        # Catalog registration: the delivered server becomes findable
+        # Catalog registration: written to DOINg.AI, then findable
         registration = await run_op("portfolio.register_mcp", render_obj(by_step["register_mcp"]["config"]["input"], ctx, STRICT))
         assert registration["created"] and registration["server"]["tools"][0]["name"] == "get_nostro_balances"
         link = render_obj(by_step["register_mcp"]["config"]["create_link"], {**ctx, "output": registration}, STRICT)
         assert link["external_id"] == registration["server"]["id"]
+        assert any(s["id"] == registration["server"]["id"] for s in doing_ai.state["mcpServers"])
         top = (await run_op("portfolio.search_mcp", {"capability": "nostro account balances"}))[0]
         assert top["server"]["id"] == registration["server"]["id"] and top["score"] >= 0.6
 
-        # Go-live: the DOINg.AI use case is marked delivered
+        # Go-live: the DOINg.AI use case is marked delivered, in DOINg.AI itself
         uc_ctx = full_context("use_case_onboarding")
         updated = await run_op("portfolio.update_status", render_obj(by_step["portfolio_update"]["config"]["input"], uc_ctx, STRICT))
         assert (updated["project"]["status"], updated["project"]["devStatus"]) == ("Done", "prod")
+        stored = next(p for p in doing_ai.state["projects"] if p["id"] == "prj-1006")
+        assert stored["status"] == "Done" and stored["auditLog"][-1]["userName"] == "DOINg.AI Factory"
+        assert all(u.get("passwordHash") for u in doing_ai.state["users"])        # nothing else lost
+        assert doing_ai.state["llmConfig"]["apiKey"] == "sk-live-never-leaves"
 
     asyncio.run(scenario())

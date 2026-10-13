@@ -266,10 +266,10 @@ def test_secrets_masking():
     assert apply_secret_patch({"api_key": mask_secret("x" * 20)}, "api_key") == {}     # masked keeps stored
     assert apply_secret_patch({"api_key": None}, "api_key") == {"api_key": ""}         # null clears
     assert apply_secret_patch({"api_key": "new"}, "api_key") == {"api_key": "new"}
-    conn = public_connector({"env": {"JIRA_TOKEN": "abcdefghijklmnopqrst", "MODE": "sandbox"},
+    conn = public_connector({"env": {"JIRA_TOKEN": "abcdefghijklmnopqrst", "MODE": "readonly"},
                              "headers": {"Authorization": "Bearer abcdefghijklmnop"},
                              "args": ["--url", "https://bob:hunter2@jira.local"], "url": ""})
-    assert conn["env"]["MODE"] == "sandbox" and is_masked(conn["env"]["JIRA_TOKEN"])
+    assert conn["env"]["MODE"] == "readonly" and is_masked(conn["env"]["JIRA_TOKEN"])
     assert is_masked(conn["headers"]["Authorization"]) and "hunter2" not in conn["args"][1]
 
 

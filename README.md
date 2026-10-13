@@ -6,7 +6,7 @@ configurable multi-stage workflows (**Blueprints**). These coordinate sponsors, 
 developers, IT, security and compliance, and a **local LLM** does the drafting, rewording, Jira
 writing, estimation hints, test design, compliance QA and agentic steps over **MCP** tools.
 
-Reference scenario, which runs end to end on the bundled sandbox:
+Reference scenario, run against your real DOINg.AI and Jira:
 
 1. A sponsor creates a use case in DOINg.AI, and a **watcher** polling the DOINg.AI MCP server detects it.
 2. The Factory opens a project from the *Use Case Onboarding* blueprint. An agent finds that the
@@ -18,8 +18,8 @@ Reference scenario, which runs end to end on the bundled sandbox:
 
 **Starts clean, degrades honestly.** The app boots with nothing configured. Anything that needs
 the LLM or an MCP connector fails *at use time* with a message that names the fix ("No LLM
-configured — open Settings › AI Model"). Nothing is ever fabricated. Sandbox connectors are
-labelled **Sandbox** and installed only on request.
+configured — open Settings › AI Model"). Nothing is ever fabricated, and nothing is simulated:
+there is no demo data and no sandbox server — every connector points at a real system.
 
 The contract for every contributor is [`docs/SPEC.md`](docs/SPEC.md). The UI is 100 % English.
 
@@ -33,10 +33,10 @@ The contract for every contributor is [`docs/SPEC.md`](docs/SPEC.md). The UI is 
 | **Inbox** | Every task waiting for you (forms, approvals, estimates, confirmations, quality gates, failures, intake) with the action panel inline — `j`/`k`, `a` approve, `r` reject |
 | **Projects** | Table / board / tree portfolio; project page with stage pipeline, step drawer, artifacts with versions, activity, live agent trace, dependency graph, AI status report, risk explanation, **audit dossier** export (Markdown: step log, artifacts, approvals, gate checks, hash-verified audit trail) |
 | **Factory Floor** | Live board: every project as a token in its current stage, AI workers ticker (LLM calls, tool calls, agent thoughts) |
-| **Intake** | Items detected by the watchers, triaged by the AI (blueprint, priority, team, sponsor), accepted in one click; "Simulate a sponsor creating a use case" on the sandbox |
+| **Intake** | Items detected by the watchers, triaged by the AI (blueprint, priority, team, sponsor), accepted in one click |
 | **KPIs** | Lead time, throughput, stage bottleneck heatmap, SLA, approvals by role, AI automation share & hours saved, quality first-pass rate, LLM usage, intake funnel, workload |
 | **Studio** | Visual **Blueprint designer** (10 step types, type-specific forms, variable helper, validation, *Generate with AI*), **Operations** (MCP bindings: direct / LLM-built / agent, with *Try it*), **Prompt library**, **Compliance rules** |
-| **Settings** | AI model (presets, model picker, live test), MCP connectors + tool bench, watchers (schedules, mappings), people / teams / roles, notifications (+ **daily digest** on business days), engine autonomy & scheduler, hours-saved baselines, tamper-evident audit log, backup / import, demo environment |
+| **Settings** | AI model (presets, model picker, live test), MCP connectors (templates for DOINg.AI, Jira and remote servers, one-click standard setup) + tool bench, watchers (schedules, mappings), people / teams / roles (people imported from DOINg.AI), notifications (+ **daily digest** on business days), engine autonomy & scheduler, hours-saved baselines, tamper-evident audit log, backup / import |
 | **Copilot** | "Ask the Factory" chat over the whole portfolio, read-only tools, answers cite projects as clickable chips |
 | **User Guide** | In-app guide (menu *User Guide*, the **?** icon in the header, or `g u`): every screen, the 10 step types, configuration, an end-to-end walkthrough, shortcuts and troubleshooting — searchable, with links into the app |
 | **Factory MCP** | The Factory itself is an MCP server at `/mcp` (projects, approvals, KPIs) for other agents |
@@ -56,24 +56,26 @@ Jira stories carry Given/When/Then acceptance criteria and a WSJF-informed prior
 
 ## Status
 
-Everything in the SPEC is implemented: 406 backend tests and the frontend tests pass, and the
-production build is clean. Verified live with the local `qwen3.5:4b` (Ollama): the watcher detects
-the two new sandbox use cases, the AI qualifies an accepted one, and an *MCP Delivery* project runs
-from the AI-drafted spec through team routing, the Jira epic (agent searches, then asks before
-creating), the two-person sign-off and the AI estimate. The later delivery stages (stories,
-compliance gate, release approval, catalog registration) are covered by tests with a scripted
-model, not yet by a live run. A small local model is slow (10–60 s per AI step on an 8 GB Mac)
-and sometimes imperfect: every AI output is shown for review, nothing is invented when it fails.
+Everything in the SPEC is implemented: 442 backend tests and the frontend tests pass. The app is
+real-only: the end-to-end delivery stages are covered by tests against a DOINg.AI backend double and an
+mcp-atlassian double with the real tool shapes. A small local model is slow (10–60 s per AI step on an
+8 GB Mac) and sometimes imperfect: every AI output is shown for review, nothing is invented when it fails.
 
-## Demo in 5 steps
+## Getting started in 5 steps
 
 1. Start the API and the UI (below), open http://127.0.0.1:3070.
 2. The setup wizard: pick your Ollama model (tool-capable), **Test**, **Save**.
-3. **Install demo environment** — sandbox DOINg.AI + Jira MCP servers, the people, teams, operations and the *New DOINg.AI use cases* watcher.
-4. **Intake › Run now** (or *Simulate a sponsor creating a use case*), then **Accept** an item: a *Use Case Onboarding* project starts and the AI qualifies it, analyses its MCP dependencies and fans out one *MCP Delivery* project per missing server.
-5. Switch persona (top right) — Paul (PM), Alice (sponsor), Sofia (dev lead), Emma (IT ops), Lucas (security)… — and work the **Inbox**; watch it move on the **Factory Floor** and in **KPIs**.
-
-To read your **real** DOINg.AI instead of the sandbox: Settings › Connectors › *Duplicate as DOINg.AI bridge* (read-only, `DOING_AI_MODE=bridge`, `DOING_AI_URL=http://localhost:3001`).
+3. **Settings › Connectors › Add from template**:
+   - **DOINg.AI** — the URL of your DOINg.AI backend (e.g. `http://localhost:3001`);
+   - **Jira** — `sooperset/mcp-atlassian` started with `uvx` ([install uv](https://docs.astral.sh/uv/)): your Jira URL,
+     then an e-mail + API token (Cloud) or a personal access token (Server/Data Center).
+   Each connector is tested as soon as it is saved. Then run **Standard setup** on each: it creates the operations the
+   builtin blueprints call and the *New DOINg.AI use cases* watcher.
+4. **Settings › People & Teams**: **Import from DOINg.AI** (sponsors get the Sponsor role), give everyone their
+   Factory roles, and create the delivery teams with their Jira project key and skills (routing picks among them).
+   Optionally set the *Change Jira project* input of the MCP Delivery blueprint (Studio) to your change project.
+5. **Intake › Run now**, then **Accept** a use case: a *Use Case Onboarding* project starts. Switch persona (top right)
+   to work the **Inbox**; watch it move on the **Factory Floor** and in **KPIs**.
 
 ---
 
@@ -96,13 +98,8 @@ npm install && npm run dev
 The workspace launch configs `factory-api` and `factory-web` (`/Users/mathieumasson/CLAUDE/.claude/launch.json`)
 run the same two commands. Ports 3000–3062 belong to other local apps, so the Factory uses **3070/3071**.
 
-On first open, an onboarding checklist points at what is missing, starting with the AI model
-in Settings › AI Model. The one-click **Sandbox demo** (in onboarding and in the ⌘K palette) then installs:
-
-- the reference people and teams;
-- two sandbox MCP connectors;
-- the operations the builtin blueprints call;
-- the *New DOINg.AI use cases* watcher.
+On first open, an onboarding checklist points at what is missing: the AI model, the DOINg.AI and
+Jira connectors, their standard setup, and the people.
 
 ## Windows
 
@@ -117,13 +114,13 @@ serve-windows.bat     :: production — builds the UI, then one process on :3071
 What is specific to Windows, and already handled:
 
 - **No `--reload` for the API.** uvicorn's reloader puts asyncio on the Selector loop, which cannot
-  start subprocesses, so no local (stdio) MCP server — including the bundled DOINg.AI and Jira
-  servers — could start. The scripts run `python -m app`; restart the API window after a backend change.
+  start subprocesses, so no local (stdio) MCP server — including the DOINg.AI MCP server and
+  mcp-atlassian — could start. The scripts run `python -m app`; restart the API window after a backend change.
   (If you start it with `--reload` anyway, connectors fail with a message saying exactly that.)
 - **Time zones:** Windows has no IANA database, so `tzdata` is installed there; otherwise the scheduler
   timezone (Europe/Paris by default) would silently become UTC.
 - **MCP servers:** `.cmd` launchers (`npx`, `uvx`) are resolved through `PATH`, children get UTF-8 pipes
-  (`PYTHONUTF8`), no console window pops up, and the sandbox servers lock their state with `msvcrt`.
+  (`PYTHONUTF8`) and no console window pops up.
 - **Batch files keep CRLF** (`.gitattributes`), and every text file is read and written as UTF-8.
 
 `backend/tests/test_windows_compat.py` pins these rules so they are checked on any OS. Not yet
@@ -150,7 +147,7 @@ Two layers:
   | Variable | Default | Purpose |
   |---|---|---|
   | `FACTORY_HOST` / `FACTORY_PORT` | `127.0.0.1` / `3071` | where `python -m app` listens |
-  | `FACTORY_DATA_DIR` | `data` | runtime data (sandbox MCP state in `data/sandbox/`) |
+  | `FACTORY_DATA_DIR` | `data` | runtime data |
   | `FACTORY_DB_PATH` | `data/factory.db` | SQLite document store (WAL) |
   | `FACTORY_STATIC_DIR` | auto: `../frontend/dist` | built UI to serve |
   | `FACTORY_BACKGROUND_JOBS` | `true` | scheduler + boot-time connector check (off for tests/scripts) |
@@ -172,30 +169,25 @@ LLM tips:
 - Keep *Reasoning* off for thinking models such as `qwen3.5`, which is much faster.
 - Models tagged `-cloud` run off the machine, and the UI flags them.
 
-## Bundled MCP servers
+## MCP servers
 
-Two stdlib-only stdio servers live in `backend/mcp_servers/` and speak MCP `2025-06-18` through
-`_mcp_stdio.py`. The demo registers them as connectors launched with the Factory's own interpreter.
+**DOINg.AI — `backend/mcp_servers/doing_ai_mcp.py`** (stdlib only, MCP `2025-06-18` through `_mcp_stdio.py`,
+launched with the Factory's own interpreter). It talks to a running DOINg.AI backend:
+- `DOING_AI_URL` (required), optional `DOING_AI_TOKEN` (Bearer, for a protected instance) and `DOING_AI_TIMEOUT`.
+  Without a reachable DOINg.AI it refuses to start and the connector test says why.
+- Reads: `list_projects`, `get_project`, `list_users`, `list_wishes`, `list_mcp_servers`, `search_mcp_servers`
+  (`GET /api/data`; password hashes, tokens, API headers and credentials in URLs never leave the process).
+- Writes: `update_project_status` and `register_mcp_server` — read-modify-write of DOINg.AI's document through
+  `POST /api/data` with `X-Base-Version` (optimistic concurrency; DOINg.AI merges concurrent edits by id; a 409 is
+  retried once), sending everything else back exactly as read.
 
-**DOINg.AI Portfolio — `doing_ai_mcp.py`**
-- Tools: `list_projects`, `get_project`, `list_users`, `list_wishes`, `list_mcp_servers`,
-  `search_mcp_servers`, plus the writes `create_project`, `update_project_status` and `register_mcp_server`.
-- `DOING_AI_MODE=sandbox` (default): a seeded local portfolio of 8 people and 6 projects (2 new
-  use cases in `Planning`), plus 10 catalog MCP servers and 3 wishes. State lives in `DOING_AI_STATE`.
-- `DOING_AI_MODE=bridge`: reads a **live DOINg.AI** through `GET {DOING_AI_URL}/api/data`, with
-  optional `DOING_AI_TOKEN` (Bearer) and `DOING_AI_TIMEOUT`.
-  - It is **read-only**: write tools refuse.
-  - Password hashes, tokens, API headers and credentials embedded in URLs are stripped before
-    anything leaves the process.
-  - To switch, edit the connector's environment in Settings › Connectors.
+**Jira — [sooperset/mcp-atlassian](https://github.com/sooperset/mcp-atlassian)** (`uvx mcp-atlassian`). The standard
+operations use its tool names and argument shapes (`jira_search`, `jira_get_issue`, `jira_create_issue`,
+`jira_batch_create_issues`…). Stories are linked to their epic with the *Epic Link* field and sized with *Story Points*
+(Server/Data Center names); on Jira Cloud adapt `jira.create_stories` in Studio › Operations.
 
-**Jira (Sandbox) — `jira_mcp.py`**
-- Tool names and arguments mirror `sooperset/mcp-atlassian`, so the blueprints move to a real
-  Jira MCP server by changing the connector:
-  - reads: `jira_search` (a JQL subset), `jira_get_issue`, `jira_list_projects`;
-  - writes: `jira_create_issue`, `jira_batch_create_issues`, `jira_update_issue`,
-    `jira_transition_issue`, `jira_add_comment`.
-- Seeded projects: MCPF, DATA, PAY, SEC, and OPS (change requests). State lives in `JIRA_SANDBOX_STATE`.
+Test doubles of both (a DOINg.AI backend, an mcp-atlassian look-alike) live in `backend/tests/fixtures/` and are
+used by the tests only.
 
 Any other MCP server (stdio, streamable HTTP or SSE) can be added as a connector. Tools whose
 names carry a write verb, or that declare `destructiveHint`, are **sensitive**: under the default

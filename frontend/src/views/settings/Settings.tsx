@@ -37,7 +37,7 @@ const TABS: Record<SettingsTab, { component: ComponentType; description: string 
   engine: { component: EngineTab, description: 'AI autonomy, agent budgets and the scheduler.' },
   general: { component: GeneralTab, description: 'Name of this Factory and the hours-saved baselines behind the KPIs.' },
   audit: { component: AuditTab, description: 'Tamper-evident trail of every human, AI and system action.' },
-  backup: { component: BackupTab, description: 'Export / import everything, and the Sandbox demo environment.' },
+  backup: { component: BackupTab, description: 'Export / import everything as one JSON restore point.' },
 };
 
 export default function Settings({ tab }: SettingsProps) {

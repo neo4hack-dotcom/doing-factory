@@ -213,7 +213,6 @@ class Connector(Model):
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     timeout_s: int = 60
-    sandbox: bool = False
     status: ConnectorStatus = Field(default_factory=ConnectorStatus)
     tools: list[ToolInfo] = Field(default_factory=list)
     created_at: str = ""

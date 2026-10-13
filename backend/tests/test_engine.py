@@ -19,10 +19,10 @@ from app.engine import executors_ai
 from app.engine.context import StepCtx, StepOutcome, fail, ok
 from app.errors import EngineError, Forbidden, LLMNotConfigured
 from app.models import OperationResult, QualityGateConfig, User
-from app.seed.demo import install_demo
+from tests.fixtures.factory_env import install_test_env
 from app.util import new_id, now_iso
 
-EPIC = {"key": "MCPF-7", "url": "https://jira.sandbox.local/browse/MCPF-7", "created": True, "project_key": "MCPF"}
+EPIC = {"key": "MCPF-7", "url": "https://jira.example.test/browse/MCPF-7", "created": True, "project_key": "MCPF"}
 SPEC_DRAFT = {
     "summary": "Read-only server exposing nostro balances.", "tools": ["get_balance — balance of an account"],
     "data_source": "Treasury DWH (Oracle)", "data_classification": "Confidential", "contains_pii": False,
@@ -153,7 +153,7 @@ class Fakes:
 @pytest.fixture
 def env(container, tmp_path, monkeypatch):
     monkeypatch.setattr(container.settings, "data_dir", str(tmp_path / "data"))
-    install_demo(container)
+    install_test_env(container, doing_ai_url="http://127.0.0.1:9", jira_state=tmp_path / "jira.json")
     monkeypatch.setattr(type(container.ai), "configured", property(lambda self: True))
     engine = container.engine
     monkeypatch.setattr(engine, "flush_delay_s", 0)

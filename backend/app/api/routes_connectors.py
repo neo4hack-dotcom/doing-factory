@@ -1,5 +1,6 @@
 """Connectors (MCP servers): GET|POST /connectors, GET|PUT|DELETE /connectors/{id},
-POST /connectors/{id}/test, POST /connectors/{id}/call (SPEC §7, §9).
+POST /connectors/{id}/test, POST /connectors/{id}/call, GET /connectors/templates,
+POST /connectors/from-template, POST /connectors/{id}/standard-setup (SPEC §7, §9).
 
 Secrets never leave the server: env/header values under secret-looking keys and credentials
 embedded in URLs are masked on every read (util.public_connector), and a masked value sent
@@ -18,7 +19,9 @@ from fastapi import APIRouter, Body
 from app.api import actor, editable, found, shape, validate
 from app.deps import container as c
 from app.errors import Conflict, FactoryError
+from app.mcp.templates import connector_from_template, connector_templates
 from app.models import Connector
+from app.seed.standard_ops import standard_setup as run_standard_setup
 from app.util import MASK, is_masked, new_id, now_iso, public_connector, slugify, truncate, unmask_mapping
 
 router = APIRouter(prefix="/api")
@@ -84,6 +87,47 @@ def _checked(data: dict[str, Any]) -> dict[str, Any]:
 @router.get("/connectors")
 async def list_connectors() -> list[dict[str, Any]]:
     return [_out(doc) for doc in c.store.list("connectors")]
+
+
+@router.get("/connectors/templates")
+async def list_templates() -> list[dict[str, Any]]:
+    """The real MCP servers the Factory is built for, with the fields to fill (SPEC §7)."""
+    return connector_templates()
+
+
+@router.post("/connectors/from-template")
+async def create_from_template(body: dict[str, Any] = Body(...), user_id: str = "") -> dict[str, Any]:
+    """{template_id, name?, values: {field: value}, kind?} → the saved connector, already tested
+    (its status says whether the server answered and why not), secrets masked."""
+    fields = connector_from_template(str(body.get("template_id") or ""), body.get("values") or {},
+                                     name=str(body.get("name") or ""), kind=str(body.get("kind") or ""))
+    if not str(body.get("name") or "").strip():   # default name: made unique rather than refused
+        taken = {(d.get("name") or "").strip().lower() for d in c.store.list("connectors")}
+        base, n = fields["name"], 2
+        while fields["name"].lower() in taken:
+            fields["name"], n = f"{base} {n}", n + 1
+    stamp = now_iso()
+    doc = _checked({**fields, "id": new_id("con"), "created_at": stamp, "updated_at": stamp})
+    saved = c.store.put("connectors", doc)
+    _audit(f"Connector '{saved['name']}' added from the {body.get('template_id')} template",
+           body.get("user_id") or user_id, "connector.created", saved)
+    saved = await c.mcp.test(saved["id"])   # a failure is recorded in its status, never raised
+    _changed()
+    return _out(saved)
+
+
+@router.post("/connectors/{id}/standard-setup")
+async def standard_setup(id: str, user_id: str = "") -> dict[str, Any]:
+    """Creates the operations the builtin blueprints call (and, for DOINg.AI, the new-use-case
+    watcher), bound to this connector; never overwrites what exists →
+    {operations_created, operations_existing, watcher_created, notes}."""
+    found(c.store.get("connectors", id), "Connector", id)
+    result = run_standard_setup(c, id)
+    if result["operations_created"]:
+        _changed("operations")
+    if result["watcher_created"]:
+        _changed("watchers")
+    return result
 
 
 @router.get("/connectors/{id}")

@@ -3,7 +3,7 @@
 import {
   AlertTriangle, Bell, Bot, Brain, Calculator, CheckCircle2, ClipboardPen, CornerDownRight, Eye, FileText,
   FolderKanban, GitFork, Hourglass, Info, Link2, MessageSquare, PlayCircle, Plug, Radar, RotateCcw, Settings,
-  ShieldAlert, ShieldCheck, SkipForward, Sparkles, Stamp, ThumbsDown, ThumbsUp, UserRound, Wand2, Workflow,
+  ShieldAlert, ShieldCheck, SkipForward, Sparkles, Stamp, ThumbsDown, ThumbsUp, UserRound, Workflow,
   Wrench, XCircle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -70,7 +70,6 @@ export function activityMeta(kind: string): { icon: LucideIcon; tone: Tone } {
     'settings.updated': { icon: Settings, tone: 'zinc' },
     'connector.tested': { icon: Plug, tone: 'teal' },
     'blueprint.saved': { icon: Workflow, tone: 'indigo' },
-    'demo.installed': { icon: Wand2, tone: 'violet' },
   };
   if (exact[kind]) return exact[kind];
   if (kind.startsWith('stage.') || kind.startsWith('step.')) return { icon: GitFork, tone: 'sky' };

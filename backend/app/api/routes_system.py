@@ -11,6 +11,7 @@ from app.config import VERSION
 from app.deps import container as c
 from app.inbox import inbox_counts
 from app.models import Blueprint, Connector, Operation, RoleDef, Team, User
+from app.seed.standard_ops import SUPPORTED_KINDS, operations_for
 from app.util import public_connector
 
 router = APIRouter(prefix="/api")
@@ -41,6 +42,8 @@ async def health(user_id: str = "") -> dict[str, Any]:
 async def bootstrap() -> dict[str, Any]:
     users = shape_all(User, c.users())
     connectors = [public_connector(shape(Connector, doc)) for doc in c.store.list("connectors")]
+    kinds = {conn.get("kind") for conn in connectors}
+    standard = sorted(kinds & set(SUPPORTED_KINDS))
     return {
         "settings": public_settings(c.app_settings()),
         "roles": shape_all(RoleDef, c.roles()),
@@ -53,7 +56,11 @@ async def bootstrap() -> dict[str, Any]:
             "llm_configured": bool(c.llm.configured),
             "has_connectors": bool(connectors),
             "has_users": bool(users),
-            # Sandbox connectors are only ever created by the demo installer.
-            "demo_installed": any(conn.get("sandbox") for conn in connectors),
+            "has_portfolio": "portfolio" in kinds,
+            "has_jira": "jira" in kinds,
+            # For every DOINg.AI / Jira connector kind present, the operations the builtin
+            # blueprints call exist (its standard setup was run, or they were made by hand).
+            "has_standard_operations": bool(standard) and all(c.get_operation_by_key(op["key"]) is not None
+                                                              for kind in standard for op in operations_for(kind)),
         },
     }

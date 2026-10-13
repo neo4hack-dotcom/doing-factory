@@ -1,58 +1,124 @@
-"""Jira (Sandbox) — an MCP server that behaves like a small Jira (docs/SPEC.md §13).
+"""Test double of sooperset/mcp-atlassian (Jira tools only): a small Jira behind the same MCP
+tool names, argument shapes and result shapes, over stdio.
 
-    JIRA_SANDBOX_STATE=/path/jira.json  python jira_mcp.py
+    FAKE_JIRA_STATE=/path/jira.json  python fake_jira_mcp.py
 
-Tool names and arguments mirror sooperset/mcp-atlassian (`jira_search`, `jira_create_issue`,
-`jira_batch_create_issues`…), so an Operation built on the sandbox moves to a real Jira MCP
-server by changing its connector, not the blueprints that use it.
+Mirrors what the Factory's standard Jira operations rely on:
+- `jira_search(jql, fields, limit, start_at)` → {total, start_at, max_results, issues: [issue]}
+- `jira_get_issue(issue_key, fields, …)` → issue
+- `jira_create_issue(project_key, summary, issue_type, assignee, description, components,
+  additional_fields)` → {message, issue}; `components` is a comma-separated string and
+  `additional_fields` a JSON object string (`parent`, `labels`, `priority`, fields by display
+  name such as "Epic Link" or "Story Points", `customfield_*`).
+- `jira_batch_create_issues(issues, validate_only)` → {message, issues}; `issues` is a JSON
+  array string. As in mcp-atlassian, `parent` is ignored by the batch tool: link a batch to its
+  epic with the "Epic Link" field.
+- `jira_transition_issue(issue_key, transition_id, fields, comment)`, `jira_get_transitions`,
+  `jira_add_comment(issue_key, body)`, `jira_get_all_projects()`.
+An issue reads as mcp-atlassian's simplified issue: `url` is the REST self link and
+`browse_url` the page a person opens; `status` is {name, category}.
 
-State: one JSON file (env JIRA_SANDBOX_STATE, default backend/data/sandbox/jira.json), seeded
-on first run with five team projects — MCPF (MCP Factory Squad), DATA (Data Platform), PAY
-(Payments), SEC (Security Engineering), OPS (IT Operations, change requests) — and a few
-existing issues, among them epics for MCP servers already delivered and one for a server that
-was requested but never started, so a find-or-create step has something real to find.
-
-Every issue has a `key` (MCPF-12), a `url` (https://jira.sandbox.local/browse/MCPF-12) and a
-status: To Do, In Progress or Done. `jira_search` understands a JQL subset; anything outside it
-is refused with the list of what is supported rather than silently matching nothing.
+State: one JSON file (env FAKE_JIRA_STATE), seeded on first run with five team projects —
+MCPF, DATA, PAY, SEC, OPS (change requests) — and a few issues, among them an open epic for
+a server that was requested but never started, so a find-or-create step has something to find.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _mcp_stdio import JsonState, McpServer, ToolError  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "mcp_servers"))
+from _mcp_stdio import McpServer, ToolError  # noqa: E402
 
-VERSION = "1.0.0"
-BASE_URL = "https://jira.sandbox.local"
-DEFAULT_STATE = Path(__file__).resolve().parents[1] / "data" / "sandbox" / "jira.json"
+try:   # POSIX
+    import fcntl
+except ImportError:   # pragma: no cover - Windows
+    fcntl = None   # type: ignore[assignment]
+try:   # Windows
+    import msvcrt
+except ImportError:
+    msvcrt = None   # type: ignore[assignment]
+
+VERSION = "0.11.0-fake"
+BASE_URL = "https://jira.example.test"
 
 STATUSES = ("To Do", "In Progress", "Done")
+CATEGORIES = {"To Do": "To Do", "In Progress": "In Progress", "Done": "Done"}
+TRANSITIONS = [{"id": "11", "name": "To Do"}, {"id": "21", "name": "In Progress"}, {"id": "31", "name": "Done"}]
 PRIORITIES = ("Highest", "High", "Medium", "Low", "Lowest")
 DELIVERY_TYPES = ["Epic", "Story", "Task", "Bug"]
 OPS_TYPES = ["Change", "Task", "Bug"]
 MAX_SUMMARY = 255
-UPDATABLE = ("summary", "description", "priority", "labels", "assignee", "story_points", "components", "parent_key")
+# Fields the name map resolves (lower-cased display names, as mcp-atlassian matches them).
+NAMED_FIELDS = {"labels": "labels", "priority": "priority", "epic link": "parent_key", "story points": "story_points",
+                "customfield_10014": "parent_key", "customfield_10016": "story_points"}
 
-STATE = JsonState(os.environ.get("JIRA_SANDBOX_STATE") or DEFAULT_STATE, lambda: seed_state())
 
+# ---------------------------------------------------------------------------
+# On-disk JSON state (one file shared by every process the Factory spawns)
+# ---------------------------------------------------------------------------
+
+class JsonState:
+    """Every read reloads the file; every write is a read-modify-write under an exclusive lock
+    file, committed with tmp + os.replace, so parallel processes never lose a write."""
+
+    def __init__(self, path: str | Path, seed: Callable[[], dict]) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self._seed = seed
+
+    def read(self) -> dict:
+        if not self.path.exists():
+            with self.write():
+                pass
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    @contextmanager
+    def write(self) -> Iterator[dict]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with _locked(self.path.with_name(self.path.name + ".lock")):
+            data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else self._seed()
+            yield data
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, self.path)
+
+
+@contextmanager
+def _locked(lock_path: Path) -> Iterator[None]:
+    with open(lock_path, "a+b") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:   # pragma: no cover - Windows
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:   # pragma: no cover - Windows
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+STATE = JsonState(os.environ.get("FAKE_JIRA_STATE") or "fake-jira.json", lambda: seed_state())
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _url(key: str) -> str:
-    return f"{BASE_URL}/browse/{key}"
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
 
 def _canonical(value: Any, allowed: tuple[str, ...] | list[str], label: str) -> str:
-    """The canonical spelling of a closed-list value ("in progress" → "In Progress"), or a ToolError
-    listing the options: a typo must not silently match nothing."""
     wanted = re.sub(r"[\s_-]+", " ", str(value or "")).strip().lower()
     for option in allowed:
         if option.lower() == wanted:
@@ -74,51 +140,43 @@ def _issue(state: dict, key: str) -> dict:
     for i in state["issues"]:
         if i["key"] == wanted:
             return i
-    raise ToolError(f"Issue '{key}' not found.",
-                    hint="Use jira_search to find keys, e.g. jql: project = MCPF AND issuetype = Epic")
+    raise ToolError(f"Issue '{key}' not found.")
 
 
-def _brief(issue: dict) -> dict:
-    """Search-result view: everything but the long text, so 20 results stay readable."""
-    out = {k: v for k, v in issue.items() if k not in ("description", "comments")}
-    desc = issue.get("description") or ""
-    out["description_excerpt"] = desc if len(desc) <= 200 else desc[:199].rstrip() + "…"
-    out["comment_count"] = len(issue.get("comments") or [])
+def simplified(issue: dict, *, full: bool = False) -> dict:
+    """mcp-atlassian's JiraIssue.to_simplified_dict() (the fields the Factory reads)."""
+    out: dict[str, Any] = {
+        "id": issue["id"], "key": issue["key"], "summary": issue["summary"],
+        "url": f"{BASE_URL}/rest/api/2/issue/{issue['id']}", "browse_url": f"{BASE_URL}/browse/{issue['key']}",
+        "status": {"name": issue["status"], "category": CATEGORIES.get(issue["status"], "To Do")},
+        "issue_type": {"name": issue["issue_type"]}, "priority": {"name": issue.get("priority") or "Medium"},
+        "project": {"key": issue["project_key"]},
+        "assignee": {"display_name": issue["assignee"]} if issue.get("assignee") else {"display_name": "Unassigned"},
+        "created": issue["created"], "updated": issue["updated"],
+    }
+    if issue.get("labels"):
+        out["labels"] = list(issue["labels"])
+    if issue.get("components"):
+        out["components"] = list(issue["components"])
+    if issue.get("parent_key"):
+        out["parent"] = {"key": issue["parent_key"]}
+        out["epic_key"] = issue["parent_key"]
+    if issue.get("story_points") is not None:
+        out["customfield_10016"] = {"value": issue["story_points"], "name": "Story Points"}
+    if issue.get("description"):
+        out["description"] = issue["description"] if full else issue["description"][:200]
+    if full and issue.get("comments"):
+        out["comments"] = issue["comments"]
     return out
 
 
-# ---------------------------------------------------------------------------
-# Issue validation (shared by create and batch create)
-# ---------------------------------------------------------------------------
-
-# Field names an LLM or another Jira tool commonly uses for the same thing.
-_ALIASES = {"project": "project_key", "projectkey": "project_key", "type": "issue_type", "issuetype": "issue_type",
-            "parent": "parent_key", "parentkey": "parent_key", "epic_key": "parent_key", "epic": "parent_key",
-            "points": "story_points", "storypoints": "story_points", "story_point": "story_points",
-            "label": "labels", "component": "components"}
-_CREATE_FIELDS = ("project_key", "summary", "issue_type", "description", "priority", "labels", "parent_key",
-                  "assignee", "story_points", "components")
-
-
-def _normalise_keys(raw: dict) -> tuple[dict, list[str]]:
-    fields, ignored = {}, []
-    for key, value in raw.items():
-        low = str(key).strip().lower().replace(" ", "")
-        name = _ALIASES.get(low, low)
-        if name in _CREATE_FIELDS:
-            fields[name] = value
-        else:
-            ignored.append(str(key))
-    return fields, ignored
-
-
-def _str_list(value: Any, label: str) -> list[str]:
+def _str_list(value: Any) -> list[str]:
     if value in (None, ""):
         return []
     if isinstance(value, str):
-        value = [v for v in re.split(r"[,\n]", value)]
+        value = value.split(",")
     if not isinstance(value, list):
-        raise ToolError(f"{label} must be a list of strings.")
+        raise ToolError("expected a list of names or a comma-separated string.")
     return [str(v).strip() for v in value if str(v).strip()]
 
 
@@ -128,38 +186,67 @@ def _points(value: Any) -> float | int | None:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise ToolError(f"story_points must be a number, got '{value}'.") from None
-    if number < 0:
-        raise ToolError("story_points cannot be negative.")
+        raise ToolError(f"Story Points must be a number, got '{value}'.") from None
     return int(number) if number.is_integer() else number
 
 
-def _prepare(state: dict, fields: dict) -> dict:
-    """A validated issue draft (no key yet) from create arguments, or a ToolError saying why not."""
-    project = _project(state, fields.get("project_key"))
-    summary = str(fields.get("summary") or "").strip()
+def _json_arg(value: Any, label: str, kind: type) -> Any:
+    """mcp-atlassian takes JSON-in-a-string for objects and arrays."""
+    if value in (None, ""):
+        return kind()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError as exc:
+            raise ToolError(f"{label} must be a valid JSON {kind.__name__} string: {exc}") from None
+    if not isinstance(value, kind):
+        raise ToolError(f"{label} must be a JSON {kind.__name__}.")
+    return value
+
+
+def _apply_fields(draft: dict, extra: dict, *, allow_parent: bool) -> None:
+    """additional_fields / leftover batch keys → the issue (unknown names are ignored, as the
+    real server logs and skips them)."""
+    for key, value in extra.items():
+        if key == "parent":
+            if allow_parent:
+                draft["parent_key"] = str(value.get("key") if isinstance(value, dict) else value or "").strip().upper()
+            continue
+        name = NAMED_FIELDS.get(str(key).strip().lower())
+        if name == "labels":
+            draft["labels"] = [re.sub(r"\s+", "-", label) for label in _str_list(value)]
+        elif name == "priority":
+            draft["priority"] = _canonical(value.get("name") if isinstance(value, dict) else value, PRIORITIES, "priority")
+        elif name == "parent_key":
+            draft["parent_key"] = str(value or "").strip().upper()
+        elif name == "story_points":
+            draft["story_points"] = _points(value)
+
+
+def _prepare(state: dict, project_key: Any, summary: Any, issue_type: Any, description: Any = None,
+             assignee: Any = None, components: Any = None, extra: dict | None = None, *,
+             allow_parent: bool = True) -> dict:
+    project = _project(state, project_key)
+    summary = str(summary or "").strip()
     if not summary:
         raise ToolError("summary is required.")
     if len(summary) > MAX_SUMMARY:
-        raise ToolError(f"summary is {len(summary)} characters; Jira allows {MAX_SUMMARY}. Shorten it and move details to the description.")
-    issue_type = _canonical(fields.get("issue_type") or "Task", project["issue_types"], f"issue type for {project['key']}")
-    parent_key = str(fields.get("parent_key") or "").strip().upper()
-    if parent_key:
-        if issue_type == "Epic":
-            raise ToolError("An Epic cannot have a parent. Leave parent_key empty for epics.")
-        parent = _issue(state, parent_key)
+        raise ToolError(f"summary is {len(summary)} characters; Jira allows {MAX_SUMMARY}.")
+    if not str(issue_type or "").strip():
+        raise ToolError("issue_type is required.")
+    draft = {"project_key": project["key"],
+             "issue_type": _canonical(issue_type, project["issue_types"], f"issue type for {project['key']}"),
+             "summary": summary, "description": str(description or "").strip(), "priority": "Medium",
+             "labels": [], "components": _str_list(components), "parent_key": "",
+             "assignee": str(assignee or "").strip(), "story_points": None}
+    _apply_fields(draft, extra or {}, allow_parent=allow_parent)
+    if draft["parent_key"]:
+        if draft["issue_type"] == "Epic":
+            raise ToolError("An Epic cannot have a parent.")
+        parent = _issue(state, draft["parent_key"])
         if parent["issue_type"] != "Epic":
-            raise ToolError(f"parent_key {parent_key} is a {parent['issue_type']}; the parent must be an Epic.")
-    return {
-        "project_key": project["key"], "issue_type": issue_type, "summary": summary,
-        "description": str(fields.get("description") or "").strip(),
-        "priority": _canonical(fields.get("priority") or "Medium", PRIORITIES, "priority"),
-        # Jira labels cannot contain spaces.
-        "labels": [re.sub(r"\s+", "-", label) for label in _str_list(fields.get("labels"), "labels")],
-        "components": _str_list(fields.get("components"), "components"),
-        "parent_key": parent_key, "assignee": str(fields.get("assignee") or "").strip(),
-        "story_points": _points(fields.get("story_points")),
-    }
+            raise ToolError(f"{draft['parent_key']} is a {parent['issue_type']}; the parent must be an Epic.")
+    return draft
 
 
 def _insert(state: dict, draft: dict) -> dict:
@@ -167,10 +254,9 @@ def _insert(state: dict, draft: dict) -> dict:
     number = state["counters"].get(project_key, 0) + 1
     state["counters"][project_key] = number
     state["next_id"] = state.get("next_id", 10000) + 1
-    key, now = f"{project_key}-{number}", _now()
-    issue = {"key": key, "id": str(state["next_id"]), "url": _url(key), **draft, "status": "To Do",
-             "resolution": "", "reporter": "DOINg.AI Factory", "comments": [],
-             "created": now, "updated": now, "resolved": ""}
+    now = _now()
+    issue = {"key": f"{project_key}-{number}", "id": str(state["next_id"]), **draft, "status": "To Do",
+             "reporter": "factory-service-account", "comments": [], "created": now, "updated": now}
     state["issues"].append(issue)
     return issue
 
@@ -298,7 +384,7 @@ def parse_jql(jql: str) -> tuple[list[tuple[str, str, list[str]]], list[tuple[st
             if peek() is None:
                 raise _jql_error("AND at the end of the query")
         elif is_word(peek(), "OR"):
-            raise _jql_error("OR is not supported in the sandbox: run one search per alternative, or use IN (…)")
+            raise _jql_error("OR is not supported by this test double: run one search per alternative, or use IN (…)")
         elif peek() is not None and not is_word(peek(), "ORDER"):
             raise _jql_error(f"expected AND or ORDER BY, found '{peek()[1]}'")
     return clauses, order
@@ -358,50 +444,29 @@ def _sort_key(field: str):
 
 
 # ---------------------------------------------------------------------------
-# Tools
+# Tools (names and arguments of mcp-atlassian)
 # ---------------------------------------------------------------------------
 
-server = McpServer(
-    "jira-sandbox", VERSION, "Jira (Sandbox)",
-    instructions="A sandbox Jira with projects MCPF, DATA, PAY, SEC and OPS. Search with a JQL subset "
-                 "(jira_search) before creating, to avoid duplicates. Statuses: To Do, In Progress, Done.",
-)
+server = McpServer("mcp-atlassian", VERSION, "Atlassian MCP (test double)",
+                   instructions="Jira tools: jira_search (JQL), jira_get_issue, jira_create_issue, "
+                                "jira_batch_create_issues, jira_transition_issue, jira_add_comment.")
 
 _STR = {"type": "string"}
-_STR_LIST = {"type": "array", "items": {"type": "string"}}
-_ISSUE_PROPS = {
-    "project_key": {"type": "string", "description": "Jira project key, e.g. MCPF"},
-    "summary": {"type": "string", "description": f"One line, max {MAX_SUMMARY} characters"},
-    "issue_type": {"type": "string", "description": "Epic | Story | Task | Bug (OPS: Change | Task | Bug)"},
-    "description": {"type": "string", "description": "Markdown/plain text body"},
-    "priority": {"type": "string", "description": "Highest | High | Medium | Low | Lowest"},
-    "labels": {**_STR_LIST, "description": "Labels (spaces become dashes)"},
-    "parent_key": {"type": "string", "description": "Epic key the issue belongs to, e.g. MCPF-12"},
-    "assignee": {"type": "string", "description": "Assignee e-mail or name"},
-    "story_points": {"type": ["number", "null"]},
-    "components": _STR_LIST,
-}
 
 
-@server.tool("jira_list_projects", "Jira projects with their key, name, lead, issue types and issue count.",
-             {"type": "object", "properties": {}}, read_only=True)
-def jira_list_projects() -> dict:
-    state = STATE.read()
-    counts: dict[str, int] = {}
-    for issue in state["issues"]:
-        counts[issue["project_key"]] = counts.get(issue["project_key"], 0) + 1
-    return {"projects": [{**p, "issue_count": counts.get(p["key"], 0), "url": f"{BASE_URL}/projects/{p['key']}"}
-                         for p in state["projects"]]}
+@server.tool("jira_get_all_projects", "All Jira projects the user can see.", {"type": "object", "properties": {}},
+             read_only=True)
+def jira_get_all_projects() -> list:
+    return [{"key": p["key"], "name": p["name"], "issue_types": p["issue_types"]} for p in STATE.read()["projects"]]
 
 
-@server.tool("jira_search", f"""
-    Search issues with JQL (sandbox subset). {JQL_HELP}
-    Returns issues without their full description (see jira_get_issue), most recently updated first
-    unless ORDER BY says otherwise.
-    """, {"type": "object", "properties": {
-        "jql": {"type": "string"}, "limit": {"type": "integer", "description": "Max results (default 20, max 100)"}},
-        "required": ["jql"]}, read_only=True)
-def jira_search(jql: str, limit: int = 20) -> dict:
+@server.tool("jira_search", f"Search Jira issues using JQL. Supported subset: {JQL_HELP}", {
+    "type": "object", "properties": {
+        "jql": _STR, "fields": {"type": "string", "description": "Comma-separated fields to return"},
+        "limit": {"type": "integer", "description": "Maximum results (1-50, default 10)"},
+        "start_at": {"type": "integer"}},
+    "required": ["jql"]}, read_only=True)
+def jira_search(jql: str, fields: str = "", limit: int = 10, start_at: int = 0) -> dict:
     if not (jql or "").strip():
         raise _jql_error("the query is empty")
     clauses, order = parse_jql(jql)
@@ -409,135 +474,106 @@ def jira_search(jql: str, limit: int = 20) -> dict:
     state = STATE.read()
     found = [i for i in state["issues"] if all(_matches(i, f, op, vals) for f, op, vals in clauses)]
     found.sort(key=_sort_key("key"), reverse=True)
-    for field, desc in reversed(order or [("updated", True)]):   # stable sorts: last key first
+    for field, desc in reversed(order or [("updated", True)]):
         found.sort(key=_sort_key(field), reverse=desc)
-    limit = max(1, min(int(limit or 20), 100))
-    return {"jql": jql, "total": len(found), "issues": [_brief(i) for i in found[:limit]]}
+    limit = max(1, min(int(limit or 10), 50))
+    start = max(0, int(start_at or 0))
+    return {"total": len(found), "start_at": start, "max_results": limit,
+            "issues": [simplified(i) for i in found[start:start + limit]]}
 
 
-@server.tool("jira_get_issue", """
-    One issue in full (description, comments). For an Epic, also its child issues and progress.
-    """, {"type": "object", "properties": {"issue_key": {"type": "string", "description": "e.g. MCPF-12"}},
-          "required": ["issue_key"]}, read_only=True)
-def jira_get_issue(issue_key: str) -> dict:
-    state = STATE.read()
-    issue = dict(_issue(state, issue_key))
-    if issue["issue_type"] == "Epic":
-        children = [i for i in state["issues"] if i.get("parent_key") == issue["key"]]
-        issue["children"] = [{"key": c["key"], "summary": c["summary"], "issue_type": c["issue_type"],
-                              "status": c["status"], "story_points": c.get("story_points")} for c in children]
-        issue["progress"] = {"done": sum(1 for c in children if c["status"] == "Done"), "total": len(children)}
-    elif issue.get("parent_key"):
-        parent = next((i for i in state["issues"] if i["key"] == issue["parent_key"]), None)
-        if parent:
-            issue["parent"] = {"key": parent["key"], "summary": parent["summary"], "status": parent["status"]}
-    return issue
+@server.tool("jira_get_issue", "Get details of a specific Jira issue.", {
+    "type": "object", "properties": {"issue_key": _STR, "fields": _STR, "expand": _STR,
+                                     "comment_limit": {"type": "integer"}},
+    "required": ["issue_key"]}, read_only=True)
+def jira_get_issue(issue_key: str, fields: str = "", expand: str = "", comment_limit: int = 10) -> dict:
+    return simplified(_issue(STATE.read(), issue_key), full=True)
 
 
-@server.tool("jira_create_issue", """
-    Create one issue (status To Do). Epics have no parent; a Story/Task/Bug may name its Epic in
-    parent_key. Search first (jira_search) when the issue may already exist.
-    """, {"type": "object", "properties": _ISSUE_PROPS, "required": ["project_key", "summary"]})
-def jira_create_issue(project_key: str, summary: str, issue_type: str = "Task", description: str = "",
-                      priority: str = "Medium", labels: list[str] | None = None, parent_key: str = "",
-                      assignee: str = "", story_points: float | None = None, components: list[str] | None = None) -> dict:
-    fields = {"project_key": project_key, "summary": summary, "issue_type": issue_type, "description": description,
-              "priority": priority, "labels": labels, "parent_key": parent_key, "assignee": assignee,
-              "story_points": story_points, "components": components}
+@server.tool("jira_create_issue", "Create a new Jira issue.", {
+    "type": "object", "properties": {
+        "project_key": _STR, "summary": _STR, "issue_type": _STR, "assignee": _STR, "description": _STR,
+        "components": {"type": "string", "description": "Comma-separated component names"},
+        "additional_fields": {"type": "string", "description": "JSON object string of other fields"}},
+    "required": ["project_key", "summary", "issue_type"]})
+def jira_create_issue(project_key: str, summary: str, issue_type: str, assignee: str = "", description: str = "",
+                      components: str = "", additional_fields: str = "") -> dict:
+    extra = _json_arg(additional_fields, "additional_fields", dict)
     with STATE.write() as state:
-        issue = _insert(state, _prepare(state, fields))
-    return {"ok": True, "issue": issue}
+        issue = _insert(state, _prepare(state, project_key, summary, issue_type, description, assignee, components,
+                                        extra))
+    return {"message": "Issue created successfully", "issue": simplified(issue, full=True)}
 
 
-@server.tool("jira_batch_create_issues", """
-    Create several issues at once, e.g. the stories of an epic. Each item takes the fields of
-    jira_create_issue (project_key, summary, issue_type, description, priority, labels, parent_key,
-    assignee, story_points, components). All items are validated first: if one is invalid, none is
-    created and the error names it.
-    """, {"type": "object", "properties": {
-        "issues": {"type": "array", "items": {"type": "object", "properties": _ISSUE_PROPS}}},
-        "required": ["issues"]})
-def jira_batch_create_issues(issues: list) -> dict:
-    if not isinstance(issues, list) or not issues:
-        raise ToolError("issues must be a non-empty list of issue objects.")
-    if len(issues) > 50:
-        raise ToolError(f"{len(issues)} issues in one batch; the limit is 50.")
+@server.tool("jira_batch_create_issues", "Create multiple Jira issues in a batch.", {
+    "type": "object", "properties": {
+        "issues": {"type": "string", "description": "JSON array of issue objects (project_key, summary, issue_type, "
+                                                    "description, assignee, components, other fields by name)"},
+        "validate_only": {"type": "boolean"}},
+    "required": ["issues"]})
+def jira_batch_create_issues(issues: str, validate_only: bool = False) -> dict:
+    items = _json_arg(issues, "issues", list)
+    if not items:
+        raise ToolError("issues must be a non-empty JSON array.")
     with STATE.write() as state:
-        drafts, ignored = [], set()
-        for index, raw in enumerate(issues):
+        drafts = []
+        for index, raw in enumerate(items):
             if not isinstance(raw, dict):
-                raise ToolError(f"issues[{index}] must be an object, got {type(raw).__name__}.")
-            fields, extra = _normalise_keys(raw)
-            ignored.update(extra)
+                raise ToolError(f"issues[{index}] must be an object.")
+            rest = {k: v for k, v in raw.items()
+                    if k not in ("project_key", "summary", "issue_type", "description", "assignee", "components")}
             try:
-                drafts.append(_prepare(state, fields))
+                drafts.append(_prepare(state, raw.get("project_key"), raw.get("summary"), raw.get("issue_type"),
+                                       raw.get("description"), raw.get("assignee"), raw.get("components"), rest,
+                                       allow_parent=False))
             except ToolError as exc:
-                raise ToolError(f"issues[{index}] ({str(raw.get('summary') or '')[:60]!r}): {exc.payload['error']}",
-                                **{k: v for k, v in exc.payload.items() if k != "error"},
-                                note="Nothing was created: fix this item and send the whole batch again.") from None
+                raise ToolError(f"issues[{index}]: {exc.payload['error']}",
+                                **{k: v for k, v in exc.payload.items() if k != "error"}) from None
+        if validate_only:
+            return {"message": "Issues validated successfully", "issues": []}
         created = [_insert(state, d) for d in drafts]
-    result: dict[str, Any] = {"ok": True, "count": len(created), "keys": [i["key"] for i in created], "created": created}
-    if ignored:
-        result["ignored_fields"] = sorted(ignored)
-    return result
+    return {"message": "Issues created successfully", "issues": [simplified(i) for i in created]}
 
 
-@server.tool("jira_update_issue", f"""
-    Update fields of an issue. `fields` is an object with any of: {", ".join(UPDATABLE)}.
-    Use jira_transition_issue to change the status.
-    """, {"type": "object", "properties": {"issue_key": _STR, "fields": {"type": "object"}},
-          "required": ["issue_key", "fields"]})
-def jira_update_issue(issue_key: str, fields: dict) -> dict:
-    if not isinstance(fields, dict) or not fields:
-        raise ToolError("fields must be a non-empty object.", updatable_fields=list(UPDATABLE))
-    patch, extra = _normalise_keys(fields)
-    if "status" in fields:
-        raise ToolError("status cannot be set here: use jira_transition_issue.")
-    unknown = sorted(set(extra) | {k for k in patch if k not in UPDATABLE})
-    if unknown:
-        raise ToolError(f"Cannot update {', '.join(unknown)}.", updatable_fields=list(UPDATABLE))
+@server.tool("jira_get_transitions", "Get available status transitions for a Jira issue.",
+             {"type": "object", "properties": {"issue_key": _STR}, "required": ["issue_key"]}, read_only=True)
+def jira_get_transitions(issue_key: str) -> list:
+    _issue(STATE.read(), issue_key)
+    return [dict(t) for t in TRANSITIONS]
+
+
+@server.tool("jira_transition_issue", "Transition a Jira issue to a new status.", {
+    "type": "object", "properties": {"issue_key": _STR, "transition_id": {"type": "string", "description": "ID or name"},
+                                     "fields": _STR, "comment": _STR},
+    "required": ["issue_key", "transition_id"]})
+def jira_transition_issue(issue_key: str, transition_id: str, fields: str = "", comment: str = "") -> dict:
+    wanted = str(transition_id or "").strip().lower()
+    target = next((t["name"] for t in TRANSITIONS if wanted in (t["id"], t["name"].lower())), None)
+    if target is None:
+        raise ToolError(f"Transition '{transition_id}' is not available.", available=TRANSITIONS)
     with STATE.write() as state:
         issue = _issue(state, issue_key)
-        merged = _prepare(state, {**{k: issue.get(k) for k in _CREATE_FIELDS}, **patch})
-        for key in patch:
-            issue[key] = merged[key]
-        issue["updated"] = _now()
-        result = dict(issue)
-    return {"ok": True, "issue": result, "updated_fields": sorted(patch)}
-
-
-@server.tool("jira_transition_issue", """
-    Move an issue to another status: To Do, In Progress or Done.
-    """, {"type": "object", "properties": {"issue_key": _STR,
-                                          "status": {"type": "string", "description": "To Do | In Progress | Done"}},
-          "required": ["issue_key", "status"]})
-def jira_transition_issue(issue_key: str, status: str) -> dict:
-    target = _canonical(status, STATUSES, "status")
-    with STATE.write() as state:
-        issue = _issue(state, issue_key)
-        previous = issue["status"]
-        now = _now()
         issue["status"] = target
-        issue["resolution"] = "Done" if target == "Done" else ""
-        issue["resolved"] = now if target == "Done" else ""
-        issue["updated"] = now
-        result = dict(issue)
-    return {"ok": True, "issue": result, "from": previous, "to": target}
+        issue["updated"] = _now()
+        if (comment or "").strip():
+            issue.setdefault("comments", []).append({"id": str(len(issue["comments"]) + 1), "body": comment.strip(),
+                                                     "author": "factory-service-account", "created": _now()})
+        result = simplified(issue, full=True)
+    return {"message": f"Issue {result['key']} transitioned successfully", "issue": result}
 
 
-@server.tool("jira_add_comment", "Add a comment to an issue.",
-             {"type": "object", "properties": {"issue_key": _STR, "comment": _STR}, "required": ["issue_key", "comment"]})
-def jira_add_comment(issue_key: str, comment: str) -> dict:
-    if not (comment or "").strip():
-        raise ToolError("comment cannot be empty.")
+@server.tool("jira_add_comment", "Add a comment to a Jira issue.", {
+    "type": "object", "properties": {"issue_key": _STR, "body": _STR}, "required": ["issue_key", "body"]})
+def jira_add_comment(issue_key: str, body: str) -> dict:
+    if not (body or "").strip():
+        raise ToolError("body cannot be empty.")
     with STATE.write() as state:
         issue = _issue(state, issue_key)
-        now = _now()
-        state["next_id"] = state.get("next_id", 10000) + 1
-        entry = {"id": str(state["next_id"]), "author": "DOINg.AI Factory", "body": comment.strip(), "created": now}
-        issue.setdefault("comments", []).append(entry)
-        issue["updated"] = now
-    return {"ok": True, "issue_key": issue["key"], "comment": entry}
+        entry = {"id": str(len(issue.setdefault("comments", [])) + 1), "body": body.strip(),
+                 "author": "factory-service-account", "created": _now()}
+        issue["comments"].append(entry)
+        issue["updated"] = entry["created"]
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -547,11 +583,10 @@ def jira_add_comment(issue_key: str, comment: str) -> dict:
 def _seed_issue(key: str, issue_type: str, summary: str, status: str, created: str, updated: str, *,
                 description: str = "", parent: str = "", labels: tuple[str, ...] = (), points: float | None = None,
                 priority: str = "Medium", assignee: str = "") -> dict:
-    return {"key": key, "id": "", "url": _url(key), "project_key": key.split("-")[0], "issue_type": issue_type,
+    return {"key": key, "id": "", "project_key": key.split("-")[0], "issue_type": issue_type,
             "summary": summary, "description": description, "priority": priority, "labels": list(labels),
             "components": [], "parent_key": parent, "assignee": assignee, "story_points": points,
-            "status": status, "resolution": "Done" if status == "Done" else "", "reporter": "sandbox",
-            "comments": [], "created": created, "updated": updated, "resolved": updated if status == "Done" else ""}
+            "status": status, "reporter": "jira-admin", "comments": [], "created": created, "updated": updated}
 
 
 def seed_state() -> dict:

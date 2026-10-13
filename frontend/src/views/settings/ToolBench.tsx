@@ -138,10 +138,9 @@ function ToolDetail({ connector, tool }: { connector: Connector; tool: ToolInfo 
     if (tool.sensitive) {
       const ok = await confirm({
         title: `Call ${tool.name}?`,
-        message: `This tool can change data in ${connector.name}${connector.sandbox ? ' (Sandbox)' : ''}. The call is real and audited.`,
-        tone: connector.sandbox ? 'warning' : 'danger',
+        message: `This tool can change data in ${connector.name}. The call is real and audited.`,
+        tone: 'danger',
         confirmLabel: 'Call the tool',
-        steps: connector.sandbox ? 1 : 2,
       });
       if (!ok) return;
     }

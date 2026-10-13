@@ -256,7 +256,7 @@ function AgentTaskForm({ ctx }: { ctx: ConfigContext }) {
         help="What the agent must achieve with the tools. Be explicit about the expected result." />
       <Field label="Connectors" help="Empty = every enabled connector">
         <MultiPick value={c.connector_ids} onChange={(connector_ids) => ctx.set({ connector_ids })} placeholder="All enabled connectors"
-          options={ctx.connectors.map((x) => ({ value: x.id, label: x.name, hint: `${x.tools.length} tools · ${x.kind}${x.sandbox ? ' · sandbox' : ''}` }))}
+          options={ctx.connectors.map((x) => ({ value: x.id, label: x.name, hint: `${x.tools.length} tools · ${x.kind}` }))}
           emptyHint="No connector — add one in Settings › Connectors." />
       </Field>
       <Field label="Allowed tools" help="Empty = all tools of the connectors. Sensitive (write) tools ask for confirmation under “Approve writes”.">

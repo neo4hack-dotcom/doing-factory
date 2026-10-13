@@ -51,12 +51,11 @@ function useArgRows(pending: PendingAction) {
   return { rows, setRows, args, errors, invalid: Object.keys(errors).length > 0, edited };
 }
 
-function CallHeader({ icon: Icon, verb, toolName, connectorName, sandbox, description }: {
+function CallHeader({ icon: Icon, verb, toolName, connectorName, description }: {
   icon: typeof Plug;
   verb: string;
   toolName: string;
   connectorName: string;
-  sandbox?: boolean;
   description?: string;
 }) {
   return (
@@ -73,7 +72,6 @@ function CallHeader({ icon: Icon, verb, toolName, connectorName, sandbox, descri
           {description && <p className="mt-1 text-xs text-muted">{description}</p>}
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Badge tone="amber" size="xs" icon={ShieldAlert}>Write — needs your confirmation</Badge>
-            {sandbox && <Badge tone="violet" size="xs">Sandbox</Badge>}
           </div>
         </div>
       </div>
@@ -111,7 +109,6 @@ export function ConfirmOperationAction({ project, step, userId, canAct, blockedR
         verb="The Factory is about to call"
         toolName={target.toolName}
         connectorName={target.connectorName}
-        sandbox={target.connector?.sandbox}
         description={pending.description || target.operation?.description || target.toolDescription}
       />
       <Section
@@ -184,7 +181,6 @@ export function AgentToolCallAction({ project, step, userId, canAct, blockedReas
         verb="The agent wants to call"
         toolName={target.toolName}
         connectorName={target.connectorName}
-        sandbox={target.connector?.sandbox}
         description={pending.description || target.toolDescription}
       />
       <Section

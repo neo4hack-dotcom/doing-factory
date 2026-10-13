@@ -93,9 +93,18 @@ def _slug(value: Any) -> str:
     return slugify("" if value is None else str(value), sep="-", max_len=255)
 
 
+def _compact(value: Any) -> Any:
+    """A mapping without its empty entries (None, undefined, "", [], {}) — to build tool
+    arguments where an absent optional field must not be sent at all (`{...} | compact | tojson`)."""
+    if not isinstance(value, dict):
+        return value
+    return {k: v for k, v in value.items()
+            if not (v is None or isinstance(v, Undefined) or (isinstance(v, (str, list, dict)) and not v))}
+
+
 def _make_env(undefined: type[Undefined]) -> SandboxedEnvironment:
     env = SandboxedEnvironment(undefined=undefined, autoescape=False)
-    env.filters.update(tojson=_tojson, bullets=_bullets, truncate_chars=_truncate_chars, slug=_slug)
+    env.filters.update(tojson=_tojson, bullets=_bullets, truncate_chars=_truncate_chars, slug=_slug, compact=_compact)
     return env
 
 
