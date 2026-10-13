@@ -71,29 +71,39 @@ release ticket, approval by IT + sponsor + security, catalog registration and an
     title: 'Getting started in 5 minutes',
     icon: Rocket,
     group: 'Start here',
-    summary: 'Connect the AI model, install the demo environment, pick who you are, run your first use case.',
+    summary: 'Connect the AI model, your DOINg.AI and Jira, create the standard operations, import people, assign roles.',
     body: `
-The **setup wizard** opens on first launch (and any time from *Settings › Setup wizard*).
+The **setup wizard** opens on first launch (and any time from *Settings › Setup wizard*). Until
+everything is connected, **Home** shows the same checklist, each item linking to the right screen.
 
 1. **AI model** — the wizard detects Ollama and lists your models. Pick one marked
    **Recommended** (local + tool calling, e.g. \`qwen3.5:4b\` or \`gemma4:e4b\`), press **Test**, then **Save**.
-2. **Connect** — choose **Install demo environment** to get, clearly labelled *Sandbox*:
-   - a DOINg.AI portfolio MCP server with sample use cases and an MCP catalog,
-   - a Jira MCP server with team projects (MCPF, DATA, PAY, SEC, OPS),
-   - the demo people and teams, the operations the blueprints call, and the watcher
-     *New DOINg.AI use cases*.
+2. **Connect your DOINg.AI** — enter its **URL** (and a token if your instance requires one), then
+   **Connect & test**: the Factory starts the DOINg.AI MCP server and lists its tools. If the test
+   fails, the server's own error is shown — fix the URL or token and try again.
+3. **Connect Jira** — through the **mcp-atlassian** server: your site URL (e.g.
+   \`https://yourcompany.atlassian.net\`), your e-mail and an **API token** (create one in your
+   Atlassian account security settings). **Connect & test** checks it at once.
+4. **Create the standard operations** — after a successful connection the wizard creates the usual
+   operations of each system (list new use cases, read the MCP catalog, find or create a Jira epic…)
+   and the watcher *New DOINg.AI use cases* that fills **Intake**. Existing operations are kept.
+5. **Import people** — **Import people from DOINg.AI** creates the sponsors and project managers it
+   knows (people already in the Factory are skipped). Then, in *Settings › People & Teams*, add the
+   developers, IT, security and compliance people, give everyone their **roles**, and map each
+   **team** to its Jira project.
+6. **Who are you** — pick a persona (see *People, roles and personas*).
+7. Go to **Intake**, press **Run now** on the watcher, then **Accept** a use case your sponsors
+   registered in DOINg.AI. The project starts and the AI begins working.
 
-   Or connect your own MCP servers in *Settings › Connectors*.
-3. **Who are you** — pick a persona (see *People, roles and personas*).
-4. Go to **Intake**, press **Run now** on the watcher (or **Simulate a sponsor creating a use case**),
-   then **Accept** an item. The project starts and the AI begins working.
-5. Switch persona (top right) to play the sponsor, the PM, the dev lead… and clear each **Inbox**.
+Every step is skippable and can be done later from *Settings › Connectors* (templates, **Create
+standard operations**, **Import people**).
 
 > On a small laptop a local model takes 10–60 s per AI step. Everything the AI produced is shown for
 > review; you can edit, regenerate or reject it.
 `,
     links: [
       { label: 'AI model settings', to: paths.settings('ai') },
+      { label: 'Connectors', to: paths.settings('connectors') },
       { label: 'Intake', to: paths.intake() },
     ],
   },
@@ -106,6 +116,10 @@ The **setup wizard** opens on first launch (and any time from *Settings › Setu
     body: `
 Every person has one or more **roles**: Sponsor, Product Manager, Business User, Developer,
 Dev Lead, IT Ops, Security, Compliance, Admin (editable in *Settings › People & Teams*).
+
+**Bringing people in.** **Import people** (on the DOINg.AI connector, in the setup wizard, or in
+*Settings › People & Teams*) creates the sponsors and project managers your DOINg.AI knows; people
+already in the Factory are skipped. Add the others by hand, then give everyone their roles.
 
 **Who can act on a step**
 
@@ -233,9 +247,9 @@ analyse it (no model, model error) the reason is shown on the card; press **Anal
 - **Accept** — check or change the proposal (blueprint, title, priority, sponsor, owner, team) and
   start the project.
 - **Dismiss** — with a reason; it will not come back.
-- **Run now** on a watcher card polls immediately.
-- With the demo environment, **Simulate a sponsor creating a use case** makes the AI invent a
-  realistic use case in the sandbox DOINg.AI, then runs the watcher so it lands in Intake.
+- **Run now** on a watcher card polls immediately; **Run all watchers** polls every enabled one.
+- No watcher yet? **Create standard operations** on your DOINg.AI connector adds *New DOINg.AI use
+  cases*, which polls the use cases your sponsors register there.
 
 Watchers are configured in *Settings › Watchers* (schedule, active hours and days, what to read,
 which field identifies an item, filters, and how fields map to the project).
@@ -356,11 +370,26 @@ you can insert — \`project.title\`, \`inputs.<field>\`, \`vars.<earlier result
 **Connectors** (*Settings › Connectors*) are MCP servers: a local program (**stdio**) or a URL
 (**HTTP** / **SSE**), with environment variables or headers for credentials (secrets are masked).
 **Test** lists the server's tools; the **tool bench** lets you try any tool with JSON arguments.
-Tools that write are marked *Write* and ask for confirmation.
+Tools that write are marked *Write* and ask for one confirmation before the call.
 
-**Your real DOINg.AI.** On the sandbox DOINg.AI connector press **Duplicate as DOINg.AI bridge**
-and give your DOINg.AI address (e.g. \`http://localhost:3001\`): the Factory then reads your real
-portfolio, users and MCP catalog — **read-only**.
+**Add connector** offers **templates** that fill in the launch settings for you — you only answer
+their fields (secrets are typed in password fields and masked once saved; each template links to its
+documentation):
+
+| Template | What you provide |
+|---|---|
+| **DOINg.AI** | The URL of your DOINg.AI (and a token if it needs one) |
+| **Jira (mcp-atlassian)** | Site URL, e-mail and API token |
+| **Remote MCP over HTTP** | The endpoint URL (usually ending in \`/mcp\`) and an optional auth header |
+| **Custom** | Anything else: command, arguments and environment, or URL and headers |
+
+**Connect & test** creates the connector and tests it at once: you see the tools found, or the
+server's error.
+
+**Standard setup.** On a DOINg.AI or Jira connector, **Create standard operations** adds the
+operations the built-in blueprints call (and, for DOINg.AI, the intake watcher). It is safe to run
+twice: existing operations are listed as *already there*. On a DOINg.AI connector, **Import people**
+creates the people it knows (sponsors, PMs) — existing ones are skipped.
 
 **Operations** (*Studio › Operations*) give a stable name to an action on a connector, so blueprints
 never depend on a tool name. Three modes:
@@ -474,7 +503,7 @@ business hours, time zone).
 verified* or shows where it was tampered with. Filter by kind, project or actor.
 
 **Backup** — **Export** everything as JSON (it contains your connector secrets: store it safely),
-**Import** a backup (replaces the current data after a confirmation), install the demo environment.
+**Import** a backup (replaces the current data after a confirmation).
 
 **General** — app name, company, and the **hours-saved** baseline per step type used by the KPIs.
 `,
@@ -515,31 +544,32 @@ Requirements: Python 3.12+, Node 20+, and a local model server such as Ollama.
     title: 'Walkthrough: a new use case, end to end',
     icon: Route,
     group: 'Reference',
-    summary: 'Follow one use case from DOINg.AI to production with the demo environment, persona by persona.',
+    summary: 'Follow one use case from your DOINg.AI to production, role by role.',
     body: `
-With the demo environment installed and a model configured:
+With a model configured, your DOINg.AI and Jira connected, the standard operations created and
+the people imported with their roles (switch persona at the top right to act as each of them):
 
-1. **Intake** — *Run now* on *New DOINg.AI use cases*. Two use cases appear with the AI's proposal.
-   As **Paul (Product Manager)**, **Accept** *Intraday Liquidity Forecasting Agent*.
+1. **Intake** — a sponsor registers a new use case in your DOINg.AI. *Run now* on *New DOINg.AI use
+   cases*: it appears with the AI's proposal. As **the product manager**, **Accept** it.
 2. **Qualification** — the AI qualifies the use case and the sponsor is notified of the kick-off.
-3. **Dependency analysis** — an agent lists the MCP capabilities the use case needs and searches the
-   DOINg.AI catalog: some exist, some are missing. Paul **approves** the analysis (or rejects it with
+3. **Dependency analysis** — an agent lists the MCP capabilities the use case needs and searches your
+   DOINg.AI catalog: some exist, some are missing. The PM **approves** the analysis (or rejects it with
    feedback — the agent redoes it).
 4. **Fan-out** — one *MCP Delivery* child project starts per missing server (see the
    **dependency graph** on the parent).
 5. In each child:
-   - **Specification** — Paul reviews the AI-drafted spec and submits it; the AI routes it to the
-     right team; the agent finds or creates the **Jira epic** in that team's project — Paul
+   - **Specification** — the PM reviews the AI-drafted spec and submits it; the AI routes it to the
+     right team; the agent finds or creates the **Jira epic** in that team's Jira project — the PM
      **confirms** the creation;
-   - **Sign-off** — **Sofia (Dev Lead)** and **Alice/Henri (the sponsor)** approve;
-   - **Planning** — Sofia confirms the **estimate** (AI suggestion), reviews the AI **backlog**, the
-     stories are created in Jira after confirmation;
+   - **Sign-off** — the **dev lead** and **the sponsor** approve;
+   - **Planning** — the dev lead confirms the **estimate** (AI suggestion), reviews the AI **backlog**,
+     and the stories are created in your Jira after confirmation;
    - **Build & test** — the AI writes the **test plan with Gherkin scenarios**; the step *Development*
-     waits for the epic to be *Done* (or a developer marks it complete);
-   - **Quality & compliance** — the AI checks the compliance rules; **Chloé (Compliance)** handles
+     waits for the epic to be *Done* in Jira (or a developer marks it complete);
+   - **Quality & compliance** — the AI checks the compliance rules; **the compliance officer** handles
      any failure; the developer records test results;
-   - **Release** — AI release notes, change ticket in Jira (confirmed), approval by **Emma (IT Ops)**,
-     the **sponsor** and **Lucas (Security)**, registration of the new server in the DOINg.AI catalog,
+   - **Release** — AI release notes, change ticket in Jira (confirmed), approval by **IT Ops**,
+     the **sponsor** and **Security**, registration of the new server in the DOINg.AI catalog,
      announcement to stakeholders.
 6. When all children are delivered, the parent moves to **go-live** readiness, approval and closure.
 
@@ -590,7 +620,15 @@ fixing, **Skip** with a reason, or **Complete manually**. A step interrupted by 
 may have written somewhere is never replayed blindly: it waits for your *Retry*.
 
 **"Operation … is not configured"** — a blueprint calls an operation key that does not exist: create
-it in *Studio › Operations*, or install the demo environment.
+it in *Studio › Operations*, or run **Create standard operations** on your DOINg.AI or Jira
+connector (*Settings › Connectors*).
+
+**DOINg.AI or Jira does not connect** — the test shows the server's error. For DOINg.AI, check the
+URL is reachable from this machine and the token is valid; for Jira, check the site URL, the e-mail
+and that the API token has not expired. Fix the connector (**Edit**) and press **Test**.
+
+**Intake stays empty** — check the watcher in *Settings › Watchers* (enabled, active hours) and press
+**Run now** in Intake: its last error, if any, is on its card.
 
 **A connector does not start** — *Settings › Connectors › Test* shows the server's own error output.
 On Windows, make sure the API was not started with \`--reload\`.
@@ -599,9 +637,14 @@ On Windows, make sure the API was not started with \`--reload\`.
 project's own sponsor; switch persona or ask an admin.
 
 **A use case arrived without a sponsor** — its sponsor's e-mail in DOINg.AI matches no person in the
-Factory. Add the person in *Settings › People & Teams*, then set the sponsor on the project.
+Factory. Run **Import people** on the DOINg.AI connector (or add the person in *Settings › People &
+Teams*), then set the sponsor on the project.
 `,
-    links: [{ label: 'AI Model', to: paths.settings('ai') }, { label: 'Inbox', to: paths.inbox() }],
+    links: [
+      { label: 'AI Model', to: paths.settings('ai') },
+      { label: 'Connectors', to: paths.settings('connectors') },
+      { label: 'Inbox', to: paths.inbox() },
+    ],
   },
 ];
 

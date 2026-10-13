@@ -1,5 +1,7 @@
-"""The bundled sandbox MCP servers, spoken to exactly as the Factory does: a subprocess per
-session, newline-delimited JSON-RPC 2.0 on stdio (initialize → initialized → tools/…)."""
+"""The DOINg.AI MCP server (`mcp_servers/doing_ai_mcp.py`, real) and the mcp-atlassian test
+double, spoken to exactly as the Factory does: a subprocess per session, newline-delimited
+JSON-RPC 2.0 on stdio (initialize → initialized → tools/…). The DOINg.AI server talks HTTP to
+`FakeDoingAI`, a double of the DOINg.AI backend with its exact write semantics."""
 from __future__ import annotations
 
 import json
@@ -8,14 +10,14 @@ import queue
 import subprocess
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-SERVERS = Path(__file__).resolve().parents[1] / "mcp_servers"
-DOING_AI = SERVERS / "doing_ai_mcp.py"
-JIRA = SERVERS / "jira_mcp.py"
+from tests.fixtures.fake_doing_ai import FakeDoingAI
+
+DOING_AI = Path(__file__).resolve().parents[1] / "mcp_servers" / "doing_ai_mcp.py"
+FAKE_JIRA = Path(__file__).resolve().parent / "fixtures" / "fake_jira_mcp.py"
 
 
 class Session:
@@ -81,11 +83,18 @@ class Session:
 
 
 @pytest.fixture
-def portfolio(tmp_path):
+def doing_ai():
+    with FakeDoingAI() as fake:
+        yield fake
+
+
+@pytest.fixture
+def portfolio(doing_ai):
+    """Sessions of the real DOINg.AI MCP server; by default against the `doing_ai` double."""
     sessions = []
 
     def open_session(**env: str) -> Session:
-        s = Session(DOING_AI, {"DOING_AI_MODE": "sandbox", "DOING_AI_STATE": str(tmp_path / "doing_ai.json"), **env})
+        s = Session(DOING_AI, {"DOING_AI_URL": doing_ai.url, **env})
         sessions.append(s)
         return s
 
@@ -99,13 +108,17 @@ def jira(tmp_path):
     sessions = []
 
     def open_session() -> Session:
-        s = Session(JIRA, {"JIRA_SANDBOX_STATE": str(tmp_path / "jira.json")})
+        s = Session(FAKE_JIRA, {"FAKE_JIRA_STATE": str(tmp_path / "jira.json")})
         sessions.append(s)
         return s
 
     yield open_session
     for s in sessions:
         s.close()
+
+
+def _without(doc: dict, *keys: str) -> dict:
+    return {k: v for k, v in doc.items() if k not in keys}
 
 
 # ---------------------------------------------------------------------------
@@ -115,24 +128,23 @@ def jira(tmp_path):
 def test_handshake_tool_list_and_annotations(portfolio, jira):
     p = portfolio()
     assert p.init["protocolVersion"] == "2025-06-18"
-    assert p.init["serverInfo"]["title"] == "DOINg.AI Portfolio"
+    assert p.init["serverInfo"]["title"] == "DOINg.AI"
     assert p.init["capabilities"] == {"tools": {"listChanged": False}}
     tools = p.tools()
     reads = {"list_projects", "get_project", "list_users", "list_wishes", "list_mcp_servers", "search_mcp_servers"}
-    writes = {"create_project", "update_project_status", "register_mcp_server"}
-    assert set(tools) == reads | writes
+    writes = {"update_project_status", "register_mcp_server"}
+    assert set(tools) == reads | writes   # no create_project: use cases are created by people, in DOINg.AI
     for name in reads:
         assert tools[name]["annotations"]["readOnlyHint"] is True
     for name in writes:
         assert tools[name]["annotations"] == {**tools[name]["annotations"], "readOnlyHint": False, "destructiveHint": False}
     assert all(t["inputSchema"]["type"] == "object" for t in tools.values())
 
-    j = jira()
-    jt = j.tools()
-    assert set(jt) == {"jira_list_projects", "jira_search", "jira_get_issue", "jira_create_issue",
-                       "jira_batch_create_issues", "jira_update_issue", "jira_transition_issue", "jira_add_comment"}
-    assert {n for n, t in jt.items() if t["annotations"]["readOnlyHint"]} == {"jira_list_projects", "jira_search", "jira_get_issue"}
-    assert all(t["annotations"].get("destructiveHint") is False for t in jt.values() if not t["annotations"]["readOnlyHint"])
+    jt = jira().tools()
+    assert {"jira_search", "jira_get_issue", "jira_create_issue", "jira_batch_create_issues", "jira_transition_issue",
+            "jira_add_comment"} <= set(jt)
+    assert jt["jira_create_issue"]["inputSchema"]["required"] == ["project_key", "summary", "issue_type"]
+    assert jt["jira_batch_create_issues"]["inputSchema"]["properties"]["issues"]["type"] == "string"
 
 
 def test_protocol_edges(portfolio):
@@ -153,10 +165,36 @@ def test_older_protocol_version_is_echoed(portfolio):
 
 
 # ---------------------------------------------------------------------------
-# DOINg.AI portfolio — sandbox
+# DOINg.AI MCP server — configuration
 # ---------------------------------------------------------------------------
 
-def test_seed_portfolio_is_coherent(portfolio):
+@pytest.mark.parametrize("env, fragment", [
+    ({}, "DOING_AI_URL is not set"),
+    ({"DOING_AI_URL": "localhost:3001"}, "must start with http"),
+    ({"DOING_AI_URL": "http://127.0.0.1:9", "DOING_AI_TIMEOUT": "3"}, "Cannot reach DOINg.AI at http://127.0.0.1:9"),
+])
+def test_refuses_to_start_without_a_doing_ai(env, fragment):
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("DOING_AI_")}
+    proc = subprocess.run([sys.executable, str(DOING_AI)], input="", capture_output=True, text=True, timeout=20,
+                          env={**clean, **env})
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert fragment in proc.stderr and "not started" in proc.stderr
+
+
+def test_doing_ai_going_down_after_start_is_actionable(portfolio, doing_ai):
+    p = portfolio(DOING_AI_TIMEOUT="3")
+    assert p.ok("list_users")["count"] == 8
+    doing_ai.httpd.shutdown()
+    doing_ai.httpd.server_close()
+    error = p.fail("list_projects")["error"]
+    assert f"Cannot reach DOINg.AI at {doing_ai.url}" in error and "DOING_AI_URL" in error
+
+
+# ---------------------------------------------------------------------------
+# DOINg.AI MCP server — reads
+# ---------------------------------------------------------------------------
+
+def test_reads_the_portfolio(portfolio):
     p = portfolio()
     projects = p.ok("list_projects")
     assert projects["count"] == 6
@@ -172,22 +210,15 @@ def test_seed_portfolio_is_coherent(portfolio):
     assert {u["email"] for u in users} >= {"alice.martin@doing.ai", "paul.durand@doing.ai", "ines.garcia@doing.ai"}
 
     servers = p.ok("list_mcp_servers")["mcp_servers"]
-    assert len(servers) == 10
-    assert {s["deployStatus"] for s in servers} == {"production", "uat", "dev"}
-    assert all(s["tools"] and s["teamIT"] for s in servers)
+    assert len(servers) == 10 and {s["deployStatus"] for s in servers} == {"production", "uat", "dev"}
     referenced = {sid for x in projects["projects"] for sid in x["mcpServerIds"]}
     assert referenced <= {s["id"] for s in servers}
-
-    mcp_wishes = p.ok("list_wishes", category="mcp")["wishes"]
-    assert len(mcp_wishes) == 1 and mcp_wishes[0]["sponsor"]["name"] == "Alice Martin"
-    assert p.ok("list_wishes")["count"] == 3
-
+    assert p.ok("list_wishes", category="mcp")["wishes"][0]["sponsor"]["name"] == "Alice Martin"
     full = p.ok("get_project", project_id="prj-1003")
     assert {s["name"] for s in full["mcpServers"]} >= {"Credit Risk Limits MCP", "Client 360 MCP"}
     assert full["members"][0]["name"] == "Paul Durand"
     assert p.ok("get_project", project_id="corporate loan covenant monitoring")["id"] == "prj-1006"
-    missing = p.fail("get_project", project_id="prj-404")
-    assert any(k["id"] == "prj-1001" for k in missing["known_projects"])
+    assert any(k["id"] == "prj-1001" for k in p.fail("get_project", project_id="prj-404")["known_projects"])
 
 
 def test_filters_validate_their_values(portfolio):
@@ -212,7 +243,6 @@ def test_search_ranks_plausibly(portfolio):
     assert top("client golden record and group structure")["server"]["name"] == "Client 360 MCP"
     best = top("FX spot rates")
     assert best["score"] >= 0.6 and set(best["matched_terms"]) == {"fx", "spot", "rate"}
-    # Capabilities the catalog lacks only match incidental words.
     for capability in ("nostro account balances at correspondent banks",
                        "borrower spread financial statements",
                        "Loan IQ covenant definitions and test dates"):
@@ -221,64 +251,6 @@ def test_search_ranks_plausibly(portfolio):
     assert p.ok("search_mcp_servers", capability="fx", limit="2")["count"] <= 2   # coerced from "2"
     assert "distinctive" in p.fail("search_mcp_servers", capability="the data of the MCP server")["error"]
 
-
-def test_create_project_then_list_planning(portfolio):
-    p = portfolio()
-    created = p.ok("create_project", name="Payment Fraud Triage Copilot",
-                   description="Triage suspicious outgoing payments.", context="Needs payment flows and sanctions alerts.",
-                   sponsor_email="Alice.Martin@doing.ai", business_unit="transaction banking", deadline="2027-06-30",
-                   tags="fraud, payments")
-    project = created["project"]
-    assert project["status"] == "Planning" and project["devStatus"] == "to_start"
-    assert project["sponsor"]["email"] == "alice.martin@doing.ai" and project["businessUnit"] == "Transaction Banking"
-    assert project["tags"] == ["fraud", "payments"] and project["deadline"] == "2027-06-30"
-    assert created["warnings"] == []
-
-    planning = p.ok("list_projects", status="Planning")
-    assert planning["count"] == 3 and planning["projects"][0]["id"] == project["id"]   # newest first
-    # Another process (the Factory spawns one per call) sees the same world.
-    assert portfolio().ok("get_project", project_id=project["id"])["name"] == "Payment Fraud Triage Copilot"
-
-    dup = p.fail("create_project", name="payment fraud triage copilot", description="again")
-    assert dup["project_id"] == project["id"]
-    warned = p.ok("create_project", name="Orphan", description="d", sponsor_email="nobody@doing.ai", business_unit="Mars")
-    assert len(warned["warnings"]) == 2 and warned["project"]["sponsor"] is None
-    assert "deadline" in p.fail("create_project", name="X", description="d", deadline="soon")["error"]
-
-
-def test_update_status_and_register_server(portfolio):
-    p = portfolio()
-    assert "Nothing to update" in p.fail("update_project_status", project_id="prj-1005")["error"]
-    assert p.fail("update_project_status", project_id="prj-1005", status="Live")["allowed_status_values"]
-    updated = p.ok("update_project_status", project_id="prj-1005", status="active", dev_status="dev", note="Kick-off done.")
-    assert updated["project"]["status"] == "Active" and updated["project"]["devStatus"] == "dev"
-    assert updated["changes"] and "Kick-off done." in updated["project"]["notes"]
-    assert updated["project"]["auditLog"][-1]["action"] == "Status updated"
-
-    reg = p.ok("register_mcp_server", name="Nostro Balances MCP", description="Nostro account balances at correspondents.",
-               tools=["get_nostro_balances — balance per account", {"name": "list_nostro_accounts", "description": "accounts"}],
-               tags=["treasury"], team_it="Payments", deploy_status="production", data_source="MT950")
-    server = reg["server"]
-    assert reg["created"] is True and server["deployStatus"] == "production" and server["dataSourceUsed"] == "MT950"
-    assert server["tools"][0] == {"name": "get_nostro_balances", "description": "balance per account"}
-    top = p.ok("search_mcp_servers", capability="nostro account balances")["matches"][0]
-    assert top["server"]["id"] == server["id"] and top["score"] >= 0.6
-    again = p.ok("register_mcp_server", name="nostro balances mcp", description="v2", deploy_status="uat")
-    assert again["created"] is False and again["server"]["id"] == server["id"]
-    assert again["server"]["deployStatus"] == "uat" and again["server"]["tools"] == server["tools"]   # unset = kept
-    assert p.ok("list_mcp_servers")["count"] == 11
-
-
-def test_unreadable_state_is_reported_not_reseeded(tmp_path, portfolio):
-    (tmp_path / "doing_ai.json").write_text("{broken", encoding="utf-8")
-    error = portfolio().fail("list_projects")["error"]
-    assert "unreadable" in error and "delete it" in error
-    assert (tmp_path / "doing_ai.json").read_text(encoding="utf-8") == "{broken"
-
-
-# ---------------------------------------------------------------------------
-# DOINg.AI portfolio — bridge to a live instance (GET /api/data)
-# ---------------------------------------------------------------------------
 
 LIVE_STATE = {
     "users": [{"id": "u1", "uid": "jdoe", "firstName": "Jane", "lastName": "Doe", "email": "jane.doe@bank.example",
@@ -295,161 +267,156 @@ LIVE_STATE = {
                     "url": "https://svc:hunter2@mcp.bank.example/mcp", "createdAt": "x", "updatedAt": "x"}],
     "wishes": [], "businessUnits": [{"id": "b1", "name": "Markets", "createdAt": "x"}],
     "llmConfig": {"apiKey": "sk-should-never-leave"},
+    "lastUpdated": 1790000000000,
 }
+SECRETS = ("plain", "passwordHash", "passwordSalt", "secret-token", "hunter2", "sk-should-never-leave",
+           "k-should-never-leave", "bearer-should-never-leave")
 
 
-@pytest.fixture
-def live_doing_ai():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = json.dumps(LIVE_STATE).encode() if self.path == "/api/data" else b"{}"
-            self.send_response(200 if self.path == "/api/data" else 404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)   # ephemeral port, never the user's 30xx range
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{httpd.server_address[1]}"
-    httpd.shutdown()
-    httpd.server_close()
-
-
-def test_bridge_reads_live_data_without_secrets(portfolio, live_doing_ai, tmp_path):
-    p = portfolio(DOING_AI_MODE="bridge", DOING_AI_URL=live_doing_ai + "/")
-    users = p.ok("list_users")
-    assert users["users"][0]["name"] == "Jane Doe"
-    servers = p.ok("list_mcp_servers")
-    project = p.ok("list_projects", status="Planning")["projects"][0]
-    full = p.ok("get_project", project_id="p1")
-    blob = json.dumps([users, servers, project, full])
-    for secret in ("plain", "passwordHash", "passwordSalt", "secret-token", "hunter2", "sk-should-never-leave",
-                   "k-should-never-leave", "bearer-should-never-leave"):
-        assert secret not in blob
-    assert servers["mcp_servers"][0]["url"] == "https://svc:••••@mcp.bank.example/mcp"
-    assert full["telemetry"][0]["apiUrl"] == "https://metrics.bank.example/v1?api_key=••••&q=calls"
-    assert project["sponsor"]["email"] == "jane.doe@bank.example" and project["businessUnit"] == "Markets"
-    assert project["taskStats"] == {"total": 1, "done": 1} and "auditLog" not in project
-    assert full["mcpServers"] == [{"id": "m1", "name": "Live FX MCP", "deployStatus": "production"}]
-    assert p.ok("search_mcp_servers", capability="fx rates")["matches"][0]["server"]["id"] == "m1"
-    for tool, args in (("create_project", {"name": "n", "description": "d"}),
-                       ("update_project_status", {"project_id": "p1", "status": "Active"}),
-                       ("register_mcp_server", {"name": "n", "description": "d"})):
-        assert p.fail(tool, **args)["error"].startswith("read-only bridge")
-    assert not (tmp_path / "doing_ai.json").exists()   # the bridge never creates a sandbox world
-
-
-def test_bridge_unreachable_is_actionable(portfolio):
-    error = portfolio(DOING_AI_MODE="bridge", DOING_AI_URL="http://127.0.0.1:9", DOING_AI_TIMEOUT="3").fail("list_projects")["error"]
-    assert "Cannot reach DOINg.AI at http://127.0.0.1:9" in error and "DOING_AI_URL" in error
-    assert "needs DOING_AI_URL" in portfolio(DOING_AI_MODE="bridge").fail("list_users")["error"]
+def test_reads_never_leak_secrets_and_writes_never_drop_them():
+    with FakeDoingAI(LIVE_STATE) as live:
+        p = Session(DOING_AI, {"DOING_AI_URL": live.url + "/", "DOING_AI_TOKEN": "proxy-token"})
+        try:
+            users = p.ok("list_users")
+            servers = p.ok("list_mcp_servers")
+            project = p.ok("list_projects", status="Planning")["projects"][0]
+            full = p.ok("get_project", project_id="p1")
+            updated = p.ok("update_project_status", project_id="p1", status="Active")
+            registered = p.ok("register_mcp_server", name="Live FX MCP", description="FX rates v2")
+        finally:
+            p.close()
+        blob = json.dumps([users, servers, project, full, updated, registered])
+        for secret in SECRETS:
+            assert secret not in blob
+        assert users["users"][0]["name"] == "Jane Doe"
+        assert servers["mcp_servers"][0]["url"] == "https://svc:••••@mcp.bank.example/mcp"
+        assert full["telemetry"][0]["apiUrl"] == "https://metrics.bank.example/v1?api_key=••••&q=calls"
+        assert project["sponsor"]["email"] == "jane.doe@bank.example" and project["businessUnit"] == "Markets"
+        assert project["taskStats"] == {"total": 1, "done": 1} and "auditLog" not in project
+        assert full["mcpServers"] == [{"id": "m1", "name": "Live FX MCP", "deployStatus": "production"}]
+        # The secrets went back to DOINg.AI untouched: a write sends the whole document as read.
+        stored = live.state
+        assert stored["users"] == LIVE_STATE["users"] and stored["llmConfig"] == LIVE_STATE["llmConfig"]
+        assert stored["mcpServers"][0]["token"] == "secret-token"
+        assert stored["mcpServers"][0]["url"] == "https://svc:hunter2@mcp.bank.example/mcp"
+        assert stored["projects"][0]["telemetry"] == LIVE_STATE["projects"][0]["telemetry"]
+        assert {post["authorization"] for post in live.posts} == {"Bearer proxy-token"}
 
 
 # ---------------------------------------------------------------------------
-# Jira sandbox
+# DOINg.AI MCP server — writes (read-modify-write of the whole document)
 # ---------------------------------------------------------------------------
 
-def test_jira_seed_and_search(jira):
+def test_update_status_writes_only_the_project(portfolio, doing_ai):
+    before = json.loads(json.dumps(doing_ai.state))
+    p = portfolio()
+    assert "Nothing to update" in p.fail("update_project_status", project_id="prj-1005")["error"]
+    assert p.fail("update_project_status", project_id="prj-1005", status="Live")["allowed_status_values"]
+    assert doing_ai.posts == []   # validation errors never write
+    updated = p.ok("update_project_status", project_id="prj-1005", status="active", dev_status="dev", note="Kick-off done.")
+    assert updated["project"]["status"] == "Active" and updated["project"]["devStatus"] == "dev"
+    assert updated["changes"] and "Kick-off done." in updated["project"]["notes"] and updated["merged"] is False
+    assert updated["project"]["auditLog"][-1]["action"] == "Status updated"
+
+    (post,) = doing_ai.posts
+    assert post["base"] == str(before["lastUpdated"])   # optimistic concurrency on the version read
+    after = doing_ai.state
+    assert after["lastUpdated"] > before["lastUpdated"]
+    assert _without(after, "projects", "lastUpdated") == _without(before, "projects", "lastUpdated")
+    assert [x["id"] for x in after["projects"]] == [x["id"] for x in before["projects"]]
+    assert [x["id"] for x, y in zip(after["projects"], before["projects"]) if x != y] == ["prj-1005"]
+    project = next(x for x in after["projects"] if x["id"] == "prj-1005")
+    assert project["auditLog"][-1]["userName"] == "DOINg.AI Factory" and project["updatedAt"].endswith("Z")
+    assert len(project["auditLog"][-1]["id"]) == 36   # a UUID, as DOINg.AI's own ids
+    assert p.ok("get_project", project_id="prj-1005")["status"] == "Active"   # read back from DOINg.AI
+
+
+def test_register_server_creates_then_updates(portfolio, doing_ai):
+    p = portfolio()
+    reg = p.ok("register_mcp_server", name="Nostro Balances MCP", description="Nostro account balances at correspondents.",
+               tools=["get_nostro_balances — balance per account", {"name": "list_nostro_accounts", "description": "accounts"}],
+               tags=["treasury"], team_it="Payments", deploy_status="production", data_source="MT950")
+    server = reg["server"]
+    assert reg["created"] is True and server["deployStatus"] == "production" and server["dataSourceUsed"] == "MT950"
+    assert server["tools"][0] == {"name": "get_nostro_balances", "description": "balance per account"}
+    top = p.ok("search_mcp_servers", capability="nostro account balances")["matches"][0]
+    assert top["server"]["id"] == server["id"] and top["score"] >= 0.6
+    again = p.ok("register_mcp_server", name="nostro balances mcp", description="v2", deploy_status="uat")
+    assert again["created"] is False and again["server"]["id"] == server["id"]
+    assert again["server"]["deployStatus"] == "uat" and again["server"]["tools"] == server["tools"]   # unset = kept
+    assert p.ok("list_mcp_servers")["count"] == 11 and len(doing_ai.state["mcpServers"]) == 11
+
+
+def test_a_stale_version_is_retried_once_then_reported(portfolio, doing_ai):
+    p = portfolio()
+    doing_ai.conflicts = 1
+    assert p.ok("update_project_status", project_id="prj-1003", note="Retried.")["project"]["notes"].endswith("Retried.")
+    assert len(doing_ai.posts) == 2   # 409, then a fresh read and a second write
+
+    before = json.loads(json.dumps(doing_ai.state))
+    doing_ai.conflicts = 2
+    error = p.fail("update_project_status", project_id="prj-1003", status="Paused")["error"]
+    assert "refused the write twice" in error and "Nothing was changed" in error
+    assert doing_ai.state == before and len(doing_ai.posts) == 4
+
+
+def test_a_concurrent_write_is_merged_not_lost(portfolio, doing_ai):
+    """Another DOINg.AI user saves between our read and our write: DOINg.AI merges by id, and
+    both changes survive (theirs on other entities, ours on the project we touched)."""
+    def someone_else(state: dict) -> None:
+        state["projects"].append({"id": "prj-new", "name": "Created meanwhile", "status": "Planning",
+                                  "createdAt": "2026-10-12T08:00:00.000Z", "updatedAt": "2026-10-12T08:00:00.000Z"})
+        other = next(x for x in state["projects"] if x["id"] == "prj-1001")
+        other.update(notes="Edited meanwhile.", updatedAt="2026-10-12T08:00:00.000Z")
+
+    doing_ai.before_write = someone_else
+    result = portfolio().ok("update_project_status", project_id="prj-1005", status="Active")
+    assert result["merged"] is True
+    projects = {x["id"]: x for x in doing_ai.state["projects"]}
+    assert projects["prj-new"]["name"] == "Created meanwhile" and projects["prj-1001"]["notes"] == "Edited meanwhile."
+    assert projects["prj-1005"]["status"] == "Active"
+
+
+def test_never_writes_a_document_that_is_not_doing_ai_state(portfolio, doing_ai):
+    doing_ai.state = {"projects": [{"id": "p", "name": "x", "status": "Planning"}]}   # no lastUpdated: not DOINg.AI
+    error = portfolio().fail("register_mcp_server", name="X", description="d")["error"]
+    assert "refuses to write" in error and doing_ai.posts == []
+
+
+# ---------------------------------------------------------------------------
+# The mcp-atlassian test double (it must answer like the real server for the tests to mean anything)
+# ---------------------------------------------------------------------------
+
+def test_fake_jira_search_shapes(jira):
     j = jira()
-    projects = {p["key"]: p for p in j.ok("jira_list_projects")["projects"]}
-    assert set(projects) == {"MCPF", "DATA", "PAY", "SEC", "OPS"}
-    assert projects["OPS"]["issue_types"] == ["Change", "Task", "Bug"]
-    assert projects["DATA"]["url"] == "https://jira.sandbox.local/projects/DATA"
-
-    data_epics = j.ok("jira_search", jql="project = DATA AND issuetype = Epic")
-    assert [i["key"] for i in data_epics["issues"]] == ["DATA-7"] and data_epics["issues"][0]["status"] == "Done"
+    epics = j.ok("jira_search", jql="project = DATA AND issuetype = Epic")
+    assert set(epics) == {"total", "start_at", "max_results", "issues"}
+    epic = epics["issues"][0]
+    assert epic["key"] == "DATA-7" and epic["status"] == {"name": "Done", "category": "Done"}
+    assert epic["browse_url"] == "https://jira.example.test/browse/DATA-7" and "/rest/api/2/issue/" in epic["url"]
     nostro = j.ok("jira_search", jql='summary ~ "Nostro Balance MCP" AND issuetype = epic')["issues"]
-    assert [i["key"] for i in nostro] == ["PAY-31"]   # word match with plural folding
-    assert nostro[0]["url"] == "https://jira.sandbox.local/browse/PAY-31" and "description" not in nostro[0]
-    assert j.ok("jira_search", jql='project = MCPF AND status = "in progress"')["total"] == 2
-    assert {i["key"] for i in j.ok("jira_search", jql="parent = MCPF-3")["issues"]} == {"MCPF-4"}
-    assert j.ok("jira_search", jql="labels = treasury AND project IN (PAY, DATA)")["total"] == 2
-    assert j.ok("jira_search", jql="project = SEC AND status != Done")["total"] == 2
-    assert j.ok("jira_search", jql="project = MCPF AND parent IS EMPTY")["total"] == 3
-    ordered = j.ok("jira_search", jql="project = OPS ORDER BY created ASC")["issues"]
-    assert [i["key"] for i in ordered] == ["OPS-40", "OPS-41"]
-    assert j.ok("jira_search", jql="project = MCPF", limit="2")["total"] == 5   # total counts beyond the limit
-    assert len(j.ok("jira_search", jql="project = MCPF", limit="2")["issues"]) == 2
-    assert j.ok("jira_search", jql='text ~ "stack traces"')["issues"][0]["key"] == "SEC-9"
+    assert [i["key"] for i in nostro] == ["PAY-31"]
+    assert j.ok("jira_search", jql="project = MCPF", limit="2")["total"] == 5
+    assert "OR is not supported" in j.fail("jira_search", jql="project = MCPF OR project = DATA")["error"]
 
 
-@pytest.mark.parametrize("jql, fragment", [
-    ("project = MCPF OR project = DATA", "OR is not supported"),
-    ("component = API", "unsupported field 'component'"),
-    ("status = Blocked", "Unknown status"),
-    ("project ~ MCPF", "~ only applies"),
-    ("project = MCPF AND", "AND at the end"),
-    ('summary ~ "x" ORDER BY rank', "cannot order by 'rank'"),
-    ("status = In Progress", "expected AND or ORDER BY"),
-])
-def test_jql_errors_explain_the_subset(jira, jql, fragment):
-    error = jira().fail("jira_search", jql=jql)
-    assert fragment in error["error"]
-    assert "status" in error.get("supported", "") or "allowed_values" in error
-
-
-def test_jira_create_batch_transition_comment(jira):
+def test_fake_jira_writes_take_mcp_atlassian_arguments(jira):
     j = jira()
-    epic = j.ok("jira_create_issue", project_key="mcpf", summary="MCP — Treasury Liquidity History MCP",
-                issue_type="epic", labels=["mcp", "treasury data"])["issue"]
-    assert epic["key"] == "MCPF-12" and epic["url"] == "https://jira.sandbox.local/browse/MCPF-12"
-    assert epic["status"] == "To Do" and epic["issue_type"] == "Epic" and epic["labels"] == ["mcp", "treasury-data"]
-
-    stories = [{"project_key": "MCPF", "summary": "Implement get_liquidity_history tool", "issue_type": "Story",
-                "parent_key": epic["key"], "story_points": 5, "labels": ["mcp"], "description": "As an agent developer…"},
-               {"project": "MCPF", "summary": "Add audit logging", "type": "Story", "parent": epic["key"],
-                "points": "3", "rank": 1}]
-    batch = j.ok("jira_batch_create_issues", issues=json.dumps(stories))   # a JSON string is accepted too
-    assert batch["keys"] == ["MCPF-13", "MCPF-14"] and batch["count"] == 2
-    assert [i["parent_key"] for i in batch["created"]] == ["MCPF-12", "MCPF-12"]
-    assert batch["created"][1]["story_points"] == 3 and batch["ignored_fields"] == ["rank"]
-
-    bad = j.fail("jira_batch_create_issues", issues=[{"project_key": "MCPF", "summary": "ok"},
-                                                     {"project_key": "NOPE", "summary": "bad"}])
-    assert bad["error"].startswith("issues[1]") and "MCPF — MCP Factory Squad" in bad["available_projects"]
+    epic = j.ok("jira_create_issue", project_key="MCPF", summary="MCP — Treasury Liquidity History MCP",
+                issue_type="Epic", additional_fields='{"labels": ["mcp", "treasury data"]}')
+    assert epic["message"] == "Issue created successfully"
+    assert epic["issue"]["key"] == "MCPF-12" and epic["issue"]["labels"] == ["mcp", "treasury-data"]
+    batch = j.ok("jira_batch_create_issues", issues=json.dumps([
+        {"project_key": "MCPF", "summary": "Implement get_history", "issue_type": "Story", "Epic Link": "MCPF-12",
+         "Story Points": 5, "parent": "MCPF-12"},
+        {"project_key": "MCPF", "summary": "Add audit logging", "issue_type": "Story", "parent": "MCPF-12"}]))
+    assert [i["key"] for i in batch["issues"]] == ["MCPF-13", "MCPF-14"]
+    assert batch["issues"][0]["epic_key"] == "MCPF-12" and "parent" not in batch["issues"][1]   # batch ignores parent
+    assert "issues[1]" in j.fail("jira_batch_create_issues", issues=json.dumps([
+        {"project_key": "MCPF", "summary": "ok", "issue_type": "Task"}, {"project_key": "NOPE", "summary": "x", "issue_type": "Task"}]))["error"]
     assert j.ok("jira_search", jql="project = MCPF")["total"] == 8   # nothing from the failed batch
-
-    full = j.ok("jira_get_issue", issue_key="mcpf-12")
-    assert [c["key"] for c in full["children"]] == ["MCPF-13", "MCPF-14"] and full["progress"] == {"done": 0, "total": 2}
-    assert j.ok("jira_get_issue", issue_key="MCPF-13")["parent"]["key"] == "MCPF-12"
-
-    moved = j.ok("jira_transition_issue", issue_key="MCPF-13", status="done")
-    assert (moved["from"], moved["to"], moved["issue"]["resolution"]) == ("To Do", "Done", "Done")
-    assert j.fail("jira_transition_issue", issue_key="MCPF-13", status="Closed")["allowed_values"] == ["To Do", "In Progress", "Done"]
-    j.ok("jira_transition_issue", issue_key="MCPF-12", status="Done")
-    assert j.ok("jira_get_issue", issue_key="MCPF-12")["status"] == "Done"
-
-    comment = j.ok("jira_add_comment", issue_key="MCPF-14", comment="Blocked on firewall opening.")
-    assert comment["comment"]["body"] == "Blocked on firewall opening."
-    assert j.ok("jira_get_issue", issue_key="MCPF-14")["comments"][0]["author"] == "DOINg.AI Factory"
-
-    updated = j.ok("jira_update_issue", issue_key="MCPF-14", fields={"priority": "high", "story_points": 2, "labels": ["mcp", "audit"]})
-    assert updated["issue"]["priority"] == "High" and updated["updated_fields"] == ["labels", "priority", "story_points"]
-    assert "jira_transition_issue" in j.fail("jira_update_issue", issue_key="MCPF-14", fields={"status": "Done"})["error"]
-    assert j.fail("jira_update_issue", issue_key="MCPF-14", fields={"reporter": "x"})["updatable_fields"]
-
-    change = j.ok("jira_create_issue", project_key="OPS", summary="Production release — X v1.0", issue_type="Change")
-    assert change["issue"]["key"] == "OPS-42"
-
-
-def test_jira_validation_messages(jira):
-    j = jira()
-    wrong_type = j.fail("jira_create_issue", project_key="MCPF", summary="x", issue_type="Change")
-    assert "issue type for MCPF" in wrong_type["error"] and wrong_type["allowed_values"] == ["Epic", "Story", "Task", "Bug"]
-    assert "must be an Epic" in j.fail("jira_create_issue", project_key="MCPF", summary="x", parent_key="MCPF-4")["error"]
-    assert "cannot have a parent" in j.fail("jira_create_issue", project_key="MCPF", summary="x", issue_type="Epic",
-                                            parent_key="MCPF-3")["error"]
-    assert "Jira allows 255" in j.fail("jira_create_issue", project_key="MCPF", summary="x" * 300)["error"]
-    assert "jira_search" in j.fail("jira_get_issue", issue_key="MCPF-999")["hint"]
-    assert j.ok("jira_create_issue", project_key="MCPF", summary="Points as text", story_points="")["issue"]["story_points"] is None
-
-
-def test_concurrent_processes_do_not_lose_writes(jira):
-    first, second = jira(), jira()
-    a = first.ok("jira_create_issue", project_key="DATA", summary="From process A")["issue"]["key"]
-    b = second.ok("jira_create_issue", project_key="DATA", summary="From process B")["issue"]["key"]
-    assert (a, b) == ("DATA-24", "DATA-25")
-    assert {i["key"] for i in first.ok("jira_search", jql='project = DATA AND summary ~ "from process"')["issues"]} == {a, b}
+    moved = j.ok("jira_transition_issue", issue_key="MCPF-13", transition_id="31")
+    assert moved["issue"]["status"]["category"] == "Done"
+    assert j.ok("jira_add_comment", issue_key="MCPF-14", body="Blocked.")["body"] == "Blocked."
+    assert "valid JSON" in j.fail("jira_create_issue", project_key="MCPF", summary="x", issue_type="Task",
+                                  additional_fields="{not json")["error"]

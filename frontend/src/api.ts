@@ -7,10 +7,10 @@
 // event. The backend enforces permissions with it and answers 403 with a readable message.
 import type {
   AppSettings, Approval, Artifact, Backup, Blueprint, Bootstrap, Briefing, ChainVerification, Chat,
-  Connector, CopilotReply, DemoInstallResult, Estimate, Event, Health, InboxCounts, InboxItem,
+  Connector, ConnectorTemplate, CopilotReply, Estimate, Event, Health, InboxCounts, InboxItem,
   IntakeItem, Kpis, LLMCall, LLMSettings, LinkKind, LlmModelInfo, LlmPreset, LlmTestResult,
   Notification, Operation, OperationResult, Priority, Project, ProjectStatus, ProjectSummary,
-  ProjectDossier, PromptDef, ReportAudience, RewriteStyle, RoleDef, Rule, Team, ToolCallResult, User,
+  ProjectDossier, PeopleImportResult, PromptDef, ReportAudience, RewriteStyle, RoleDef, Rule, StandardSetupResult, Team, ToolCallResult, User,
   ValidationReport, Watcher, WatcherRunResult,
 } from './types';
 
@@ -219,6 +219,11 @@ export const api = {
     update: (id: string, user: Partial<User>) => put<User>(`/users/${enc(id)}`, user),
     remove: (id: string) => del(`/users/${enc(id)}`),
   },
+  people: {
+    /** Creates the people (sponsors, PMs…) a portfolio connector (DOINg.AI) knows; existing ones are skipped. */
+    importFromConnector: (connector_id: string) =>
+      post<PeopleImportResult>('/people/import-from-connector', { connector_id }),
+  },
   teams: {
     list: () => get<Team[]>('/teams'),
     create: (team: Partial<Team>) => post<Team>('/teams', team),
@@ -242,6 +247,13 @@ export const api = {
     test: (id: string) => post<Connector>(`/connectors/${enc(id)}/test`),
     call: (id: string, tool: string, args: Record<string, unknown>) =>
       post<ToolCallResult>(`/connectors/${enc(id)}/call`, { tool, args }),
+    /** Ready-made recipes (DOINg.AI, Jira via mcp-atlassian, remote MCP over HTTP…). */
+    templates: () => get<ConnectorTemplate[]>('/connectors/templates'),
+    /** Creates a connector from a template and tests it at once (secrets come back masked). */
+    fromTemplate: (template_id: string, values: Record<string, string>, name?: string) =>
+      post<Connector>('/connectors/from-template', { template_id, name, values }),
+    /** Creates the standard operations (and the intake watcher) of a portfolio or Jira connector. Idempotent. */
+    standardSetup: (id: string) => post<StandardSetupResult>(`/connectors/${enc(id)}/standard-setup`),
   },
 
   // Operations (MCP bindings)
@@ -390,10 +402,6 @@ export const api = {
 
   // Admin
   admin: {
-    /** Idempotent: installs the Sandbox users, teams, connectors, operations and watcher. */
-    installDemo: () => post<DemoInstallResult>('/admin/demo/install'),
-    /** The LLM invents a realistic use case and creates it through the sandbox DOINg.AI MCP. */
-    simulateUseCase: (hint?: string) => post<{ use_case: Record<string, unknown> }>('/admin/demo/simulate-use-case', { hint }),
     export: () => get<Backup>('/admin/export'),
     import: (backup: Backup) => post<OkResponse>('/admin/import', backup),
     llmCalls: (days?: number) => get<LLMCall[]>(`/admin/llm-calls${qs({ days })}`),

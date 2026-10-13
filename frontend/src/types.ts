@@ -192,7 +192,6 @@ export interface Connector {
   headers: Record<string, string>;
   enabled: boolean;
   timeout_s: number;
-  sandbox: boolean;
   status: ConnectorStatus;
   tools: ToolInfo[];
   created_at: string;
@@ -991,7 +990,9 @@ export interface Onboarding {
   llm_configured: boolean;
   has_connectors: boolean;
   has_users: boolean;
-  demo_installed: boolean;
+  has_portfolio: boolean;            // a DOINg.AI (portfolio) connector exists
+  has_jira: boolean;                 // a Jira connector exists
+  has_standard_operations: boolean;  // the standard operations + watcher were created
 }
 
 export interface Bootstrap {
@@ -1094,10 +1095,42 @@ export interface CopilotReply {
   messages: ChatMessage[];
 }
 
-export interface DemoInstallResult {
-  created: { users: number; teams: number; connectors: number; operations: number; watchers: number };
-  /** Live test of each sandbox connector right after the install. */
-  connectors?: { id: string; name: string; ok: boolean; tool_count: number; error: string }[];
+/** A ready-made connector recipe (GET /connectors/templates): DOINg.AI, Jira (mcp-atlassian), remote HTTP… */
+export interface ConnectorTemplateField {
+  key: string;
+  label: string;
+  secret: boolean;       // rendered as a password input; masked once saved
+  required: boolean;
+  placeholder: string;
+  help: string;
+}
+
+export interface ConnectorTemplate {
+  id: 'doing_ai' | 'jira' | 'http' | (string & {});
+  name: string;
+  kind: ConnectorKind;
+  description: string;
+  transport: Transport;
+  command: string;
+  args: string[];
+  env_template: Record<string, string>;
+  fields: ConnectorTemplateField[];
+  docs_url: string;
+}
+
+/** POST /connectors/{id}/standard-setup — the standard operations (and watcher) of a portfolio/Jira connector. */
+export interface StandardSetupResult {
+  operations_created: string[];
+  operations_existing: string[];
+  watcher_created: boolean;
+  notes: string[];
+}
+
+/** POST /people/import-from-connector — people read from a portfolio connector (DOINg.AI). */
+export interface PeopleImportResult {
+  created: number;
+  skipped: number;
+  users: User[];
 }
 
 /** Full JSON backup (GET /admin/export) — collection name → documents. Opaque to the UI. */

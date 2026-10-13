@@ -131,7 +131,7 @@ CONTRACT: list[tuple[str, str, bool, list[str]]] = [
     ("app.ai_utils", "summarize_project", ASYNC, ["container", "pid"]),
     ("app.ai_utils", "generate_blueprint", ASYNC, ["container", "description"]),
     ("app.ai_utils", "suggest_operation", ASYNC, ["container", "connector_id", "intent"]),
-    ("app.ai_utils", "simulate_use_case", ASYNC, ["container", "hint"]),
+    ("app.seed.standard_ops", "standard_setup", SYNC, ["container", "connector_id"]),
 ]
 
 

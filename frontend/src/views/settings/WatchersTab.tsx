@@ -106,7 +106,7 @@ export default function WatchersTab() {
         <Button icon={Plus} disabled={!operations.length} onClick={() => setEditing('new')}>Add watcher</Button>
       </div>
       {!operations.length && (
-        <Note tone="amber" icon={Radar}>A watcher polls an operation: create one in Studio › Operations first (or install the Sandbox demo).</Note>
+        <Note tone="amber" icon={Radar}>A watcher polls an operation: create one in Studio › Operations first — or run “Create standard operations” on your DOINg.AI connector (Settings › Connectors), which also adds the intake watcher.</Note>
       )}
 
       {watchers === null ? (

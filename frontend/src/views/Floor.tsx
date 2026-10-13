@@ -2,13 +2,12 @@
 // stages as columns and every project as a token in its current stage; a stats bar on top and a
 // "Live AI workers" ticker on the right. Data = the project list, then live `project.updated`
 // patches; the ticker is seeded from the LLM-call log and audit events, then streams.
-import { Factory, FolderPlus, PackagePlus, Radar } from 'lucide-react';
+import { Factory, FolderPlus, Plug, Radar } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { iconByName } from '../components/StepIcon';
-import { Button, EmptyState, Skeleton, useBusy, useToast } from '../components/ui';
+import { Button, EmptyState, Skeleton } from '../components/ui';
 import { cls } from '../lib/cls';
-import { plural } from '../lib/format';
 import { usePageTitle } from '../lib/pageTitle';
 import { navigate, paths } from '../lib/router';
 import { useApp, useLive } from '../lib/store';
@@ -26,9 +25,7 @@ const MOVED_MS = 2600;
 
 export default function Floor() {
   usePageTitle('Factory Floor');
-  const { blueprints, onboarding, reload, live } = useApp();
-  const toast = useToast();
-  const [busy, run] = useBusy();
+  const { blueprints, onboarding, live } = useApp();
 
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState('');
@@ -134,15 +131,6 @@ export default function Floor() {
     writeStorage(BLUEPRINT_KEY, id || null);
   };
 
-  const installDemo = () => run('demo', async () => {
-    const res = await api.admin.installDemo();
-    await reload();
-    const c = res.created;
-    toast.success(`Demo environment ready — ${plural(c.connectors, 'connector')}, ${plural(c.operations, 'operation')}, ${plural(c.watchers, 'watcher')}.`, {
-      action: { label: 'Open Intake', onClick: () => navigate(paths.intake()) },
-    });
-  });
-
   // ---- Render -------------------------------------------------------------------------------
   const header = (
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -179,13 +167,14 @@ export default function Floor() {
         <EmptyState
           icon={Factory}
           title="The floor is quiet — no project yet"
-          description={onboarding?.demo_installed
-            ? 'The demo environment is installed. Accept a detected use case in Intake (or simulate a sponsor creating one) and watch it travel through the stages here.'
-            : 'Install the sandbox demo environment (DOINg.AI + Jira MCP servers, a team, operations and a watcher) or start a project by hand.'}
+          description={!onboarding?.has_portfolio
+            ? 'Projects start from the use cases your sponsors register in DOINg.AI. Connect it (Settings › Connectors) and its watcher lands new use cases in Intake — or start a project by hand.'
+            : 'Accept a detected use case in Intake (run the watcher to check DOINg.AI now) and watch it travel through the stages here — or start a project by hand.'}
           action={(
             <>
-              {!onboarding?.demo_installed && <Button variant="ai" icon={PackagePlus} busy={busy === 'demo'} onClick={installDemo}>Install demo environment</Button>}
-              {onboarding?.demo_installed && <Button variant="ai" icon={Radar} onClick={() => navigate(paths.intake())}>Open Intake</Button>}
+              {!onboarding?.has_portfolio
+                ? <Button icon={Plug} onClick={() => navigate(`${paths.settings('connectors')}?add=doing_ai`)}>Connect DOINg.AI</Button>
+                : <Button icon={Radar} onClick={() => navigate(paths.intake())}>Open Intake</Button>}
               <Button variant="outline" icon={FolderPlus} onClick={() => navigate(paths.newProject())}>New project</Button>
             </>
           )}

@@ -50,7 +50,7 @@ export default function Operations() {
         <EmptyState
           icon={Plug}
           title="Connect an MCP server first"
-          description="An operation binds to a tool of a connector. Add a connector — or install the sandbox demo environment — in Settings."
+          description="An operation binds to a tool of a connector. Connect your DOINg.AI or Jira in Settings › Connectors, then let “Create standard operations” add the usual ones."
           action={<Button icon={Settings2} onClick={() => navigate(paths.settings('connectors'))}>Open Settings › Connectors</Button>}
         />
       ) : operations.length === 0 ? (
@@ -93,7 +93,6 @@ export default function Operations() {
                           <span className="inline-flex items-center gap-1.5 text-xs">
                             <span className={cls('h-1.5 w-1.5 rounded-full', connector.status.ok === true ? 'bg-emerald-500' : connector.status.ok === false ? 'bg-rose-500' : 'bg-zinc-400')} />
                             {connector.name}
-                            {connector.sandbox && <Badge size="xs" tone="amber">sandbox</Badge>}
                           </span>
                         ) : <span className="text-xs text-rose-600 dark:text-rose-400">Missing connector</span>}
                       </td>

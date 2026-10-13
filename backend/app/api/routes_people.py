@@ -1,4 +1,5 @@
-"""People & Teams: users, teams and the role catalogue (SPEC §3.2, §9).
+"""People & Teams: users, teams, the role catalogue, and the import of people from a DOINg.AI
+connector (SPEC §3.2, §9).
 
 Membership is stored on both sides (User.team_ids and Team.member_ids) because the engine
 resolves assignees from either; every write here keeps the two in step so neither can drift.
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Body
 
 from app.api import actor, editable, found, shape, shape_all, validate
 from app.deps import container as c
-from app.errors import Conflict, FactoryError
+from app.errors import Conflict, FactoryError, MCPError, NotConfigured
 from app.models import RoleDef, Team, User
 from app.util import new_id, now_iso, slugify
 
@@ -72,6 +73,59 @@ async def delete_user(id: str, user_id: str = "") -> dict[str, Any]:
     c.store.delete("users", id)
     _audit(f"User {user.get('name') or id} deleted", user_id, action="user.deleted", user_id=id)
     return {"ok": True, "id": id}
+
+
+@router.post("/people/import-from-connector")
+async def import_from_connector(body: dict[str, Any] = Body(...), user_id: str = "") -> dict[str, Any]:
+    """{connector_id} → {created, skipped, users}: the people of DOINg.AI (its `list_users` tool)
+    become Factory users — name, email, title; the role `sponsor` for those who sponsor a
+    DOINg.AI project, no other role (roles are a Factory decision). An e-mail already known
+    (or missing) is skipped, so running it again only adds newcomers."""
+    connector_id = str(body.get("connector_id") or "").strip()
+    connector = found(c.store.get("connectors", connector_id), "Connector", connector_id)
+    if connector.get("kind") != "portfolio":
+        raise FactoryError(f"'{connector.get('name')}' is not a DOINg.AI connector (kind 'portfolio'): people are "
+                           "imported from DOINg.AI.", 422)
+    if not connector.get("enabled", True):
+        raise NotConfigured(f"The connector '{connector.get('name')}' is disabled — enable it in Settings › Connectors.")
+    people = await _tool_data(connector, "list_users", {})
+    projects = await _tool_data(connector, "list_projects", {"include_archived": True})
+    sponsor_ids = {p.get("sponsorId") for p in projects.get("projects") or [] if isinstance(p, dict) and p.get("sponsorId")}
+    can_sponsor = "sponsor" in {r.get("key") for r in c.roles()}
+    created: list[dict[str, Any]] = []
+    skipped = 0
+    seen: set[str] = set()
+    for person in people.get("users") or []:
+        if not isinstance(person, dict):
+            skipped += 1
+            continue
+        email = str(person.get("email") or "").strip()
+        name = str(person.get("name") or "").strip() or " ".join(
+            str(person.get(k) or "").strip() for k in ("firstName", "lastName")).strip()
+        if not email or not _EMAIL.fullmatch(email) or not name or email.lower() in seen or c.user_by_email(email):
+            skipped += 1
+            continue
+        seen.add(email.lower())
+        roles = ["sponsor"] if can_sponsor and person.get("id") in sponsor_ids else []
+        user = validate(User, {"id": new_id("usr"), "name": name, "email": email,
+                               "title": str(person.get("functionTitle") or "").strip(), "roles": roles,
+                               "created_at": now_iso()}, "user").model_dump()
+        created.append(c.store.put("users", user))
+    if created:
+        _audit(f"{len(created)} user(s) imported from '{connector.get('name')}'", body.get("user_id") or user_id,
+               action="user.imported", connector_id=connector_id, count=len(created))
+    return {"created": len(created), "skipped": skipped, "users": shape_all(User, created)}
+
+
+async def _tool_data(connector: dict[str, Any], tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    result = await c.mcp.call_tool(connector["id"], tool, args)
+    if not result.get("ok"):
+        raise MCPError(f"'{connector.get('name')}' could not answer {tool}: {result.get('error') or 'unknown error'}")
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise MCPError(f"'{connector.get('name')}' answered {tool} with something other than an object — is it the "
+                       "DOINg.AI MCP server?")
+    return data
 
 
 def _checked_user(data: dict[str, Any]) -> dict[str, Any]:

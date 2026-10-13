@@ -4,8 +4,8 @@
 Each one builds its facts deterministically from the store, hands them to the LLM with a
 library prompt, and returns the model's text or a validated draft. Grounding is the rule:
 the facts block is all the model knows, and a draft the model produces (blueprint,
-operation, simulated use case) is normalised and checked against what really exists
-(roles, tools, operations, sandbox users) before anyone sees it.
+operation) is normalised and checked against what really exists (roles, tools, operations)
+before anyone sees it.
 
 Only the morning briefing has a no-LLM answer, because Home must render without a model: a
 deterministic summary of the same facts, returned with `ai: false` and labelled as such.
@@ -14,12 +14,11 @@ with a message that names the fix.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -27,9 +26,9 @@ from pydantic import ValidationError
 from app import inbox as inbox_mod
 from app import risk as risk_mod
 from app.engine import blueprint as blueprint_engine
-from app.errors import FactoryError, LLMError, MCPError, NotConfigured, NotFound
+from app.errors import FactoryError, LLMError, NotConfigured, NotFound
 from app.models import STEP_CONFIG_MODELS, Blueprint, FieldDef, Operation, ReportAudience, RewriteStyle
-from app.util import now_iso, parse_iso, slugify, truncate, validation_message
+from app.util import now_iso, slugify, truncate, validation_message
 
 if TYPE_CHECKING:  # pragma: no cover
     from app.deps import Container
@@ -520,95 +519,6 @@ async def suggest_operation(container: "Container", connector_id: str, intent: s
     if warnings:
         draft["warnings"] = warnings
     return draft
-
-
-# =====================================================================================
-# Sandbox: simulate a sponsor creating a use case in DOINg.AI
-# =====================================================================================
-
-def _portfolio_sandbox(c: "Container") -> dict:
-    candidates = [d for d in c.store.list("connectors") if d.get("kind") == "portfolio" and d.get("sandbox")]
-    if not candidates:
-        raise NotConfigured("No sandbox DOINg.AI connector — install the sandbox demo first (onboarding or ⌘K › "
-                            "Install sandbox demo).")
-    connector = next((d for d in candidates if d.get("enabled", True)), None)
-    if connector is None:
-        raise NotConfigured(f"The connector '{candidates[0].get('name')}' is disabled — enable it in Settings › Connectors.")
-    if (connector.get("env") or {}).get("DOING_AI_MODE", "sandbox") != "sandbox":
-        raise NotConfigured(f"The connector '{connector.get('name')}' reads a live DOINg.AI (bridge mode, read-only): "
-                            f"simulating a use case only works in sandbox mode.")
-    return connector
-
-
-async def _read_tool(c: "Container", connector_id: str, tool: str, args: dict, what: str) -> Any:
-    result = await c.mcp.call_tool(connector_id, tool, args)
-    if not result.get("ok"):
-        raise MCPError(f"Could not read {what} from the DOINg.AI sandbox: {result.get('error') or 'unknown error'}")
-    return result.get("data") or {}
-
-
-async def simulate_use_case(container: "Container", hint: str = "") -> dict:
-    """The LLM invents a realistic Corporate & Investment Banking use case — grounded in the
-    sandbox's real people, business units and MCP catalog — and creates it in DOINg.AI via the
-    sandbox `create_project` tool, where the watcher will detect it like any sponsor's."""
-    c = container
-    connector = _portfolio_sandbox(c)
-    cid = connector["id"]
-    users, catalog, portfolio = await asyncio.gather(
-        _read_tool(c, cid, "list_users", {}, "its users"),
-        _read_tool(c, cid, "list_mcp_servers", {}, "the MCP catalog"),
-        _read_tool(c, cid, "list_projects", {}, "its projects"))
-    emails = sorted({u.get("email") for u in users.get("users") or [] if u.get("email")})
-    if not emails:
-        raise MCPError("The DOINg.AI sandbox returned no users to act as sponsor.")
-    people = "\n".join(f"- {u.get('email')}: {u.get('name')}, {u.get('functionTitle') or ''} ({u.get('team') or ''})"
-                       for u in users.get("users") or [] if u.get("email"))
-    servers = "\n".join(f"- {s.get('name')}: {truncate(s.get('description'), 140)}"
-                        for s in (catalog.get("mcp_servers") or [])[:25])
-    projects = portfolio.get("projects") or []
-    units = sorted({p.get("businessUnit") for p in projects if p.get("businessUnit")})
-    taken = sorted({p.get("name") for p in projects if p.get("name")})
-    today = date.today()
-    schema = {"type": "object", "required": ["name", "description", "context", "sponsor_email", "deadline"],
-              "properties": {"name": {"type": "string"}, "description": {"type": "string"},
-                             "context": {"type": "string"}, "sponsor_email": {"type": "string", "enum": emails},
-                             "business_unit": ({"type": "string", "enum": units} if units else {"type": "string"}),
-                             "deadline": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}}
-    request = (
-        "Invent ONE realistic new AI use case that a business sponsor of a Corporate & Investment Bank (CIB) "
-        "would register in DOINg.AI, the bank's AI portfolio tool.\n"
-        + (f"Theme requested: {hint.strip()}\n" if (hint or "").strip() else "")
-        + "\nRequirements:\n"
-        "- name: 3-7 words, specific (not generic), different from the existing names listed below.\n"
-        "- description: 2-3 sentences: the business problem, who benefits, the expected benefit with a figure.\n"
-        "- context: the data and tool needs, as 4-6 bullet lines '- <capability>: <what is needed>'. Mix "
-        "capabilities that the MCP catalog below already covers (name them as the catalog does) with 2-3 that "
-        "no catalog server covers.\n"
-        "- sponsor_email: one of the sandbox people below (a business head, not IT).\n"
-        + (f"- business_unit: one of {', '.join(units)}.\n" if units else "")
-        + f"- deadline: a date between {(today + timedelta(days=60)).isoformat()} and "
-        f"{(today + timedelta(days=270)).isoformat()}, format YYYY-MM-DD.\n"
-        "- tags: 2-4 lowercase keywords.\n\n"
-        f"Sandbox people:\n{people}\n\nMCP catalog:\n{servers or '- (empty)'}\n\n"
-        f"Existing use case names (do not reuse):\n" + "\n".join(f"- {n}" for n in taken[:40]))
-    data = await c.ai.ask("use_case_simulator", request, prompt_key="orchestrator", json_schema=schema,
-                          temperature=0.8)
-    deadline = str(data.get("deadline") or "")[:10]
-    parsed = parse_iso(deadline) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", deadline) else None
-    args = {"name": str(data["name"]).strip(), "description": str(data["description"]).strip(),
-            "context": str(data.get("context") or "").strip(), "sponsor_email": data["sponsor_email"],
-            "business_unit": str(data.get("business_unit") or ""),
-            "deadline": deadline if parsed and parsed.date() > today else "",
-            "tags": [str(t).strip().lower() for t in data.get("tags") or [] if str(t).strip()][:6]}
-    created = await c.mcp.call_tool(cid, "create_project", args)
-    if not created.get("ok"):
-        raise MCPError(f"The DOINg.AI sandbox refused the use case: {created.get('error') or 'unknown error'}")
-    payload = created.get("data") or {}
-    use_case = payload.get("project") or args
-    c.record_event("demo.installed", f"Simulated sponsor use case '{args['name']}' created in the DOINg.AI sandbox",
-                   actor="ai", data={"action": "simulate_use_case", "external_id": use_case.get("id", ""),
-                                     "connector_id": cid})
-    return {"use_case": use_case, "warnings": payload.get("warnings") or []}
 
 
 def clear_briefing_cache() -> None:

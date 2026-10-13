@@ -5,7 +5,8 @@ a blueprint whose key exists are left exactly as the user edited them (a deleted
 blueprint comes back on the next boot — duplicate it to customise). Prompts are not seeded
 here: the AI runtime falls back to `llm/prompts.py` until an admin edits one.
 
-The builtin blueprints are the product demo (docs/SPEC.md §13). Data flows between steps
+The builtin blueprints (docs/SPEC.md §13) run on the operations of the standard setup
+(app/seed/standard_ops.py: DOINg.AI and Jira connectors). Data flows between steps
 through `project.vars[store_as]`; each prompt names the vars it reads, so a step can be
 understood (and edited) on its own. Jinja conventions (§4): `when`, `items` and `until` are
 bare expressions; every other string is a template, and a template that is exactly one
@@ -129,12 +130,9 @@ RULES: list[dict[str, Any]] = [
 # Blueprint building blocks
 # ---------------------------------------------------------------------------
 
-# A builtin blueprint cannot know which connector serves the portfolio tools (the sandbox, a
-# bridge to the live DOINg.AI, any name), so the dependency agent is limited by bare tool names,
-# plus the qualified names of the bundled sandbox connector ("DOINg.AI Portfolio (Sandbox)").
-PORTFOLIO_SANDBOX_SLUG = "doing_ai_portfolio_sandbox"
-_PORTFOLIO_READ_TOOLS = ["search_mcp_servers", "list_mcp_servers", "get_project"]
-PORTFOLIO_AGENT_TOOLS = _PORTFOLIO_READ_TOOLS + [f"{PORTFOLIO_SANDBOX_SLUG}__{t}" for t in _PORTFOLIO_READ_TOOLS]
+# A builtin blueprint cannot know what the DOINg.AI connector is called, so the dependency
+# agent is limited by bare tool names, resolved among every enabled connector (SPEC §14).
+PORTFOLIO_AGENT_TOOLS = ["search_mcp_servers", "list_mcp_servers", "get_project"]
 
 # Template fragments shared by several prompts, spliced in as [[NAME]] after dedenting (a
 # multi-line fragment spliced before would defeat textwrap.dedent). List fragments start each
@@ -619,8 +617,9 @@ DELIVERED_PROMPT = _t("""
     Expected action: none.
 """)
 
+# mcp-atlassian: `browse_url` is the issue's page, `url` its REST link.
 _JIRA_LINK = {"kind": "jira", "label": "{{ output.key }} · {{ output.summary or 'Jira' }}",
-              "url": "{{ output.url }}", "external_id": "{{ output.key }}"}
+              "url": "{{ output.browse_url or output.url }}", "external_id": "{{ output.key }}"}
 
 MCP_DELIVERY = {
     "id": "bp_mcp_delivery", "key": "mcp_delivery", "name": "MCP Delivery",
@@ -635,6 +634,9 @@ MCP_DELIVERY = {
         field_def("data_source", "Source system", placeholder="e.g. Treasury data warehouse (Oracle)"),
         field_def("suggested_team", "Suggested team"),
         field_def("parent_use_case", "Requested by (use case)"),
+        field_def("change_project_key", "Change Jira project",
+                  help="Jira project of the production change request. Empty = the delivery team's project; "
+                       "set a default here (Studio › Blueprints) to send every change to your change-management project."),
     ],
     "stages": [
         _stage("specification", "Specification", "sky", [
@@ -705,9 +707,12 @@ MCP_DELIVERY = {
             }, store_as="test_plan"),
             _step("development", "Development", "wait_for", {
                 "operation_key": "jira.get_issue", "input": {"issue_key": "{{ vars.epic.key }}"},
-                "until": "output.status == 'Done'", "poll_minutes": 15, "timeout_hours": 0, "manual_complete": True,
+                # mcp-atlassian's status is {name, category}: the "Done" category covers Closed, Resolved…
+                "until": "((output.status.category or output.status.name) if output.status is mapping "
+                         "else output.status) == 'Done'",
+                "poll_minutes": 15, "timeout_hours": 0, "manual_complete": True,
             }, store_as="development", assignee=_who("developer", project_role="team"), sla_hours=240,
-                description="The team builds in Jira. Completes when the epic is Done (checked every 15 minutes) or when a developer marks it complete."),
+                description="The team builds in Jira. Completes when the epic's status is in the Done category (checked every 15 minutes) or when a developer marks it complete."),
         ], description="Build in Jira while the tests are designed.", parallel=True),
         _stage("quality", "Quality & Compliance", "rose", [
             _step("compliance_gate", "IT-compliance quality gate", "quality_gate", {
@@ -737,7 +742,8 @@ MCP_DELIVERY = {
             }, store_as="release_notes"),
             _step("change_ticket", "Raise the production change", "mcp_operation", {
                 "operation_key": "jira.create_change",
-                "input": {"summary": "Production release — {{ inputs.mcp_name }} v1.0",
+                "input": {"project_key": "{{ inputs.change_project_key or vars.routing.jira_project_key or vars.epic.project_key }}",
+                          "summary": "Production release — {{ inputs.mcp_name }} v1.0",
                           "description": "{{ vars.release_notes.markdown }}\n\nDelivery epic: {{ vars.epic.key }} · "
                                          "Factory project: {{ project.key }}",
                           "priority": "{{ 'High' if project.priority in ['high', 'critical'] else 'Medium' }}",

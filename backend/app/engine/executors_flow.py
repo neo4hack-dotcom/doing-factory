@@ -449,8 +449,8 @@ async def poll_wait_for(sc: StepCtx) -> StepOutcome:
     timed_out = _timed_out(sc.step, cfg.timeout_hours, now)
     op = sc.container.get_operation_by_key(cfg.operation_key)
     if op is None:
-        return fail(f"Operation '{cfg.operation_key}' not found — create it in Studio › Operations (or install the "
-                    "sandbox demo), then press Retry", retryable=False)
+        return fail(f"Operation '{cfg.operation_key}' not found — create it in Studio › Operations (or run the "
+                    "standard setup of its connector in Settings › Connectors), then press Retry", retryable=False)
     try:
         op_input = render_obj(cfg.input, sc.tctx)
     except TemplateError as exc:

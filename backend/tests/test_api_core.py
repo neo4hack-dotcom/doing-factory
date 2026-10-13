@@ -38,13 +38,15 @@ def test_bootstrap_shape_and_onboarding(client, container):
     assert set(body) == {"settings", "roles", "users", "teams", "blueprints", "connectors", "operations", "onboarding"}
     assert body["settings"]["llm"]["api_key"] == "" and body["settings"]["has_api_key"] is False
     assert body["onboarding"] == {"llm_configured": False, "has_connectors": False, "has_users": False,
-                                  "demo_installed": False}
+                                  "has_portfolio": False, "has_jira": False, "has_standard_operations": False}
 
-    container.store.put("connectors", {"id": "con_1", "name": "Jira (Sandbox)", "sandbox": True, "transport": "stdio",
+    container.store.put("connectors", {"id": "con_1", "name": "Jira", "kind": "jira", "transport": "stdio",
                                        "env": {"JIRA_API_TOKEN": "abcdefghijklmnopqrstuvwxyz"}})
     container.store.put("users", {"id": "usr_1", "name": "Alice"})
     body = client.get("/api/bootstrap").json()
-    assert body["onboarding"]["has_connectors"] and body["onboarding"]["demo_installed"] and body["onboarding"]["has_users"]
+    assert body["onboarding"] == {"llm_configured": False, "has_connectors": True, "has_users": True,
+                                  "has_portfolio": False, "has_jira": True, "has_standard_operations": False}
+    assert "sandbox" not in body["connectors"][0]
     connector = body["connectors"][0]
     assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(connector)
     assert connector["status"] == {"ok": None, "checked_at": None, "error": "", "latency_ms": 0,

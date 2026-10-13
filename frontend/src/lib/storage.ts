@@ -30,4 +30,5 @@ export const STORAGE_KEYS = {
   persona: 'factory.persona',
   sidebarCollapsed: 'factory.sidebar.collapsed',
   onboardingDismissed: 'factory.onboarding.dismissed',   // sessionStorage: asks again next visit
+  setupHidden: 'factory.setup.hidden',                    // Home: optional setup items hidden
 } as const;

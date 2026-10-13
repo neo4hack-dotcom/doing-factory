@@ -215,7 +215,7 @@ def _validate_config(container: "Container", step: dict, where: str, errors: lis
             errors.append(f"{where}: choose the operation to run")
         elif container.get_operation_by_key(parsed.operation_key) is None:
             warnings.append(f"{where}: operation '{parsed.operation_key}' does not exist yet "
-                            "(Studio › Operations, or install the sandbox demo)")
+                            "(Studio › Operations, or the standard setup of a connector in Settings › Connectors)")
         if kind == "wait_for" and not parsed.until.strip() and not parsed.manual_complete:
             warnings.append(f"{where}: no 'until' condition — the step completes at the first poll")
     elif kind == "quality_gate":

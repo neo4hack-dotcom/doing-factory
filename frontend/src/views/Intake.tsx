@@ -1,11 +1,11 @@
 // Intake (#/intake): what the watchers detected, with the AI's triage suggestion. Accept starts a
 // project (the suggestion pre-fills editable overrides), Dismiss records a reason. The watcher strip
-// on top shows each watcher's last/next run with "Run now"; with a sandbox connector installed, a
-// sponsor can be simulated end to end (the LLM registers a use case in the sandbox DOINg.AI, then
-// the watcher detects it). Live: `intake.updated` and `watcher.updated` patch the lists.
+// on top shows each watcher's last/next run with "Run now". With no watcher yet, the empty state
+// points at the real setup: connect DOINg.AI, then create its standard operations (which add the
+// intake watcher). Live: `intake.updated` and `watcher.updated` patch the lists.
 import {
   AlertTriangle, Braces, CheckCircle2, ChevronDown, ExternalLink, FolderOpen, Play, Radar, RefreshCw, Search,
-  Settings2, Sparkles, Wand2, X,
+  ListPlus, Plug, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { api } from '../api';
@@ -20,6 +20,7 @@ import { Link, navigate, paths } from '../lib/router';
 import { PRIORITY } from '../lib/status';
 import { useApp, useLive } from '../lib/store';
 import type { IntakeItem, IntakeStatus, Priority, Tone, Watcher } from '../types';
+import { connectorOfKind, standardSetupSummary } from './settings/connectorSetup';
 
 const TAB_ORDER: IntakeStatus[] = ['new', 'accepted', 'dismissed'];
 const CONFIDENCE_TONE: Record<string, Tone> = { high: 'emerald', medium: 'amber', low: 'rose' };
@@ -34,7 +35,7 @@ function upsert<T extends { id: string }>(list: T[], item: T): T[] {
 
 export default function Intake() {
   usePageTitle('Intake');
-  const { connectors, operations } = useApp();
+  const { connectors, reload } = useApp();
   const toast = useToast();
   const [busy, run] = useBusy();
   const [items, setItems] = useState<IntakeItem[] | null>(null);
@@ -78,12 +79,9 @@ export default function Intake() {
       && (!q || `${i.title} ${i.external_id} ${i.watcher_name} ${i.suggestion?.summary ?? ''}`.toLowerCase().includes(q)));
   }, [items, tab, query]);
 
-  // A sandbox portfolio connector makes the "simulate a sponsor" demo possible.
-  const sandbox = connectors.find((c) => c.sandbox && c.kind === 'portfolio') ?? null;
-  const sandboxWatchers = (watchers ?? []).filter((w) => {
-    const op = operations.find((o) => o.key === w.operation_key);
-    return w.enabled && !!sandbox && op?.connector_id === sandbox.id;
-  });
+  // The real source of new use cases: the DOINg.AI (portfolio) connector and its watchers.
+  const portfolio = connectorOfKind(connectors, 'portfolio');
+  const enabledWatchers = (watchers ?? []).filter((w) => w.enabled);
 
   const runWatcher = async (w: Watcher) => {
     const res = await api.watchers.run(w.id);
@@ -98,18 +96,25 @@ export default function Intake() {
     await Promise.all([loadItems(), loadWatchers()]);
   });
 
-  const simulate = () => run('simulate', async () => {
-    const res = await api.admin.simulateUseCase();
-    const name = String(res.use_case.name ?? res.use_case.title ?? 'A new use case');
-    if (sandboxWatchers.length === 0) {
-      toast.warn(`“${name}” was created in the DOINg.AI sandbox, but no enabled watcher polls it — enable one in Settings › Watchers.`);
-      return;
-    }
+  const runAll = () => run('run-all', async () => {
     let fresh = 0;
-    for (const w of sandboxWatchers) fresh += (await runWatcher(w)).new;
-    toast.success(`“${name}” registered by its sponsor in the DOINg.AI sandbox — ${plural(fresh, 'new item')} detected.`);
+    let scanned = 0;
+    for (const w of enabledWatchers) {
+      const res = await runWatcher(w);
+      fresh += res.new;
+      scanned += res.total;
+    }
+    toast[fresh ? 'success' : 'info'](`${plural(fresh, 'new item')} detected (${scanned} scanned).`);
     setTab('new');
     await Promise.all([loadItems(), loadWatchers()]);
+  });
+
+  const standardSetup = () => run('setup', async () => {
+    if (!portfolio) return;
+    const res = await api.connectors.standardSetup(portfolio.id);
+    await reload();
+    await loadWatchers();
+    toast.success(`${portfolio.name}: ${standardSetupSummary(res)}`);
   });
 
   return (
@@ -123,11 +128,9 @@ export default function Intake() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {sandbox && (
-            <Tooltip content="The local LLM invents a realistic use case and registers it in the sandbox DOINg.AI, as a sponsor would; the watcher then detects it.">
-              <Button variant="ai" icon={Wand2} busy={busy === 'simulate'} onClick={simulate}>
-                {busy === 'simulate' ? 'Simulating a sponsor…' : 'Simulate a sponsor creating a use case'}
-              </Button>
+          {enabledWatchers.length > 0 && (
+            <Tooltip content="Runs every enabled watcher now instead of waiting for its schedule.">
+              <Button variant="outline" icon={Play} busy={busy === 'run-all'} onClick={runAll}>Run all watchers</Button>
             </Tooltip>
           )}
           <IconButton icon={RefreshCw} label="Refresh" variant="outline" onClick={() => { void loadItems(); void loadWatchers(); }} />
@@ -156,12 +159,20 @@ export default function Intake() {
             title={query ? 'No item matches this filter' : tab === 'new' ? 'Nothing waiting for triage' : `No ${tab} item yet`}
             description={tab === 'new' && !query
               ? (watchers && watchers.length === 0
-                ? 'No watcher is configured. A watcher polls an MCP operation (e.g. DOINg.AI “new use cases”) and lands what it finds here.'
-                : 'Watchers poll on their schedule — run one now to check immediately.')
+                ? (portfolio
+                  ? `No watcher is configured. Create the standard operations of ${portfolio.name}: they add the watcher that lands new use cases here.`
+                  : 'Connect your DOINg.AI first: its standard operations add a watcher that polls new use cases and lands them here.')
+                : 'Watchers poll on their schedule — run them now to check immediately.')
               : undefined}
             action={tab === 'new' && !query ? (
               <>
-                {sandbox && <Button variant="ai" icon={Wand2} busy={busy === 'simulate'} onClick={simulate}>Simulate a sponsor</Button>}
+                {watchers && watchers.length === 0 && !portfolio && (
+                  <Button icon={Plug} onClick={() => navigate(`${paths.settings('connectors')}?add=doing_ai`)}>Connect DOINg.AI</Button>
+                )}
+                {watchers && watchers.length === 0 && portfolio && (
+                  <Button icon={ListPlus} busy={busy === 'setup'} onClick={standardSetup}>Create standard operations</Button>
+                )}
+                {enabledWatchers.length > 0 && <Button icon={Play} busy={busy === 'run-all'} onClick={runAll}>Run watchers now</Button>}
                 <Button variant="outline" icon={Settings2} onClick={() => navigate(paths.settings('watchers'))}>Configure watchers</Button>
               </>
             ) : undefined}

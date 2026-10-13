@@ -263,7 +263,7 @@ export function OperationEditor({ open, operation, onClose, onSaved, onDeleted }
             <Field label="Connector" required>
               <Select value={draft.connector_id} placeholder={connectors.length ? 'Select a connector…' : 'No connector — add one in Settings'}
                 onChange={(e) => set({ connector_id: e.target.value, tool: '', allowed_tools: [] })}
-                options={connectors.map((c) => ({ value: c.id, label: `${c.name}${c.sandbox ? ' (sandbox)' : ''} · ${c.tools.length} tools` }))} />
+                options={connectors.map((c) => ({ value: c.id, label: `${c.name} · ${c.tools.length} tools` }))} />
             </Field>
             {draft.mode !== 'agent' && (
               <Field label="Tool" required aside={tool?.sensitive ? <Badge size="xs" tone="amber" icon={ShieldAlert}>writes</Badge> : tool?.read_only ? <Badge size="xs" tone="emerald">read-only</Badge> : undefined}>

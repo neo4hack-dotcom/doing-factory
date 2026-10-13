@@ -1,7 +1,7 @@
 // ⌘K palette: jump anywhere, find a project by key or title, run quick actions — or hand the query
 // to the copilot. Everything is one keystroke list (↑ ↓ Enter, Esc closes).
 import {
-  Bot, CornerDownLeft, FolderKanban, Moon, PlayCircle, Plus, Search, Sparkles, Sun, UserRound, Wand2,
+  Bot, CornerDownLeft, FolderKanban, Moon, Plug, Plus, Search, Sparkles, Sun, UserRound,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -88,35 +88,17 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         icon: app.theme === 'dark' ? Sun : Moon, keywords: 'theme dark light mode', run: app.toggleTheme,
       },
     );
-    if (!app.onboarding?.demo_installed) {
+    const connectorsPath = paths.settings('connectors');
+    if (!app.onboarding?.has_portfolio) {
       actions.push({
-        id: 'demo', group: 'Actions', label: 'Install the Sandbox demo environment', icon: PlayCircle,
-        keywords: 'demo sandbox install jira doing',
-        run: async () => {
-          try {
-            const res = await api.admin.installDemo();
-            const c = res.created;
-            toast.success(`Sandbox installed — ${c.users} users, ${c.teams} teams, ${c.connectors} connectors, ${c.operations} operations, ${c.watchers} watchers.`);
-            await app.reload();
-          } catch (err) {
-            toast.error(err);
-          }
-        },
+        id: 'connect-doing', group: 'Actions', label: 'Connect your DOINg.AI', icon: Plug,
+        keywords: 'setup connector portfolio doing.ai mcp', run: () => navigate(`${connectorsPath}?add=doing_ai`),
       });
-    } else {
+    }
+    if (!app.onboarding?.has_jira) {
       actions.push({
-        id: 'simulate', group: 'Actions', label: 'Simulate a sponsor creating a use case', icon: Wand2,
-        keywords: 'demo sandbox simulate use case sponsor',
-        run: async () => {
-          toast.info('The local LLM is inventing a use case — this can take a minute…');
-          try {
-            const res = await api.admin.simulateUseCase();
-            const title = String(res.use_case?.name ?? res.use_case?.title ?? 'New use case');
-            toast.success(`“${title}” was created in the sandbox DOINg.AI. The watcher will pick it up on its next run.`);
-          } catch (err) {
-            toast.error(err);
-          }
-        },
+        id: 'connect-jira', group: 'Actions', label: 'Connect Jira', icon: Plug,
+        keywords: 'setup connector jira atlassian mcp-atlassian', run: () => navigate(`${connectorsPath}?add=jira`),
       });
     }
 
@@ -143,7 +125,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       run: () => navigate(paths.project(p.id)),
     }));
 
-    if (!term) return [...actions.filter((a) => a.id === 'new' || a.id === 'demo'), ...nav.filter((n) => n.group === 'Go to')];
+    if (!term) return [...actions.filter((a) => a.id === 'new' || a.id.startsWith('connect-')), ...nav.filter((n) => n.group === 'Go to')];
     const t = term.toLowerCase();
     const match = (i: PaletteItem) => `${i.label} ${i.sub ?? ''} ${i.keywords ?? ''}`.toLowerCase().includes(t);
     // Server results are already filtered (key, title, tags…); local items filter on their text.

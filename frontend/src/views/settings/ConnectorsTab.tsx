@@ -2,19 +2,24 @@
 // Cards show live health; the drawer edits the launch settings (secrets stay masked server-side);
 // the tool bench lists every tool with its schema and lets an admin try one call for real.
 import {
-  Bug, CircleDot, Copy, FlaskConical, Globe, Pencil, Plug, Plus, Radio, RefreshCw, TerminalSquare, Trash2, Wrench,
+  Bug, CircleDot, Globe, ListPlus, Pencil, Plug, Plus, Radio, RefreshCw, SlidersHorizontal, TerminalSquare, Trash2, Wrench,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../../api';
 import {
-  Badge, Button, Card, Drawer, EmptyState, Field, IconButton, Input, Select, Tabs, Textarea, Toggle, Tooltip,
-  useBusy, useConfirm, useConfirmReason, useToast,
+  Badge, Button, Card, Drawer, EmptyState, Field, IconButton, Input, Modal, Select, Tabs, Textarea, Toggle, Tooltip,
+  useBusy, useConfirm, useToast,
 } from '../../components/ui';
 import { cls } from '../../lib/cls';
 import { formatLatency, plural, timeAgo } from '../../lib/format';
+import { navigate, paths, useRoute } from '../../lib/router';
 import { useApp } from '../../lib/store';
-import type { Connector, ConnectorKind, Transport } from '../../types';
-import { fromRows, KeyValueEditor, ListEditor, MASK, Note, NumberInput, toRows } from './shared';
+import type { Connector, ConnectorKind, ConnectorTemplate, StandardSetupResult, Transport } from '../../types';
+import {
+  hasStandardSetup, ImportPeopleButton, StandardSetupReport, standardSetupSummary, TemplateConnectForm, templateIcon,
+  TemplatesLoading, useConnectorTemplates,
+} from './connectorSetup';
+import { fromRows, KeyValueEditor, ListEditor, Note, NumberInput, toRows } from './shared';
 import type { KvRow } from './shared';
 import { ToolBench } from './ToolBench';
 
@@ -48,10 +53,24 @@ export default function ConnectorsTab() {
   const { connectors, operations, reload } = useApp();
   const [editing, setEditing] = useState<Connector | 'new' | null>(null);
   const [bench, setBench] = useState<Connector | null>(null);
+  const [adding, setAdding] = useState<'pick' | ConnectorTemplate | null>(null);
+  const [setupReport, setSetupReport] = useState<{ connector: Connector; result: StandardSetupResult } | null>(null);
   const [busy, run] = useBusy();
   const confirm = useConfirm();
-  const askUrl = useConfirmReason();
   const toast = useToast();
+  const { templates, error: templatesError, reload: reloadTemplates } = useConnectorTemplates();
+
+  // Deep link from Home / the guide: #/settings/connectors?add=doing_ai|jira|http|custom
+  const { query } = useRoute();
+  const addParam = query.add ?? '';
+  useEffect(() => {
+    if (!addParam) return;
+    if (addParam === 'custom') setEditing('new');
+    else if (templates) setAdding(templates.find((t) => t.id === addParam) ?? 'pick');
+    else if (templatesError) setAdding('pick'); // the picker shows the error and a Retry
+    else return; // wait for the templates
+    navigate(paths.settings('connectors'), { replace: true });
+  }, [addParam, templates, templatesError]);
 
   const test = (c: Connector) => run(`test:${c.id}`, async () => {
     const saved = await api.connectors.test(c.id);
@@ -84,43 +103,12 @@ export default function ConnectorsTab() {
     await reload();
   });
 
-  /** A sandbox portfolio connector, re-launched in bridge mode against a real DOINg.AI (read-only). */
-  const duplicateAsBridge = async (c: Connector) => {
-    const url = await askUrl({
-      title: 'Duplicate as DOINg.AI bridge',
-      message: (
-        <>
-          The copy launches the same MCP server with <code>DOING_AI_MODE=bridge</code>: it reads your <b>real</b> DOINg.AI
-          (projects, people, MCP catalog) through its API, <b>read-only</b> — write tools answer "read-only bridge".
-          The sandbox connector stays as it is.
-        </>
-      ),
-      tone: 'info',
-      reasonLabel: 'DOINg.AI URL',
-      reasonPlaceholder: 'http://localhost:3001',
-      defaultReason: 'http://localhost:3001',
-      confirmLabel: 'Create bridge',
-    });
-    if (url === null) return;
-    await run(`bridge:${c.id}`, async () => {
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(c.env)) if (v !== MASK && k !== 'DOING_AI_STATE') env[k] = v;
-      env.DOING_AI_MODE = 'bridge';
-      env.DOING_AI_URL = url.trim().replace(/\/+$/, '');
-      const names = new Set(connectors.map((x) => x.name.toLowerCase()));
-      let name = 'DOINg.AI (live bridge)';
-      for (let n = 2; names.has(name.toLowerCase()); n++) name = `DOINg.AI (live bridge ${n})`;
-      const created = await api.connectors.create({
-        name, kind: 'portfolio', transport: 'stdio', command: c.command, args: c.args, cwd: c.cwd, env,
-        timeout_s: c.timeout_s, enabled: true, sandbox: false,
-        description: `Read-only bridge to the DOINg.AI instance at ${env.DOING_AI_URL} (same server as "${c.name}", bridge mode).`,
-      });
-      const tested = await api.connectors.test(created.id);
-      await reload();
-      if (tested.status.ok) toast.success(`${name} is connected to ${env.DOING_AI_URL} — ${plural(tested.status.tool_count, 'tool')}.`);
-      else toast.warn(`${name} was created but its test failed: ${tested.status.error || 'no answer'}`);
-    });
-  };
+  const standardSetup = (c: Connector) => run(`std:${c.id}`, async () => {
+    const result = await api.connectors.standardSetup(c.id);
+    await reload();
+    setSetupReport({ connector: c, result });
+    toast.success(`${c.name}: ${standardSetupSummary(result)}`);
+  });
 
   return (
     <div className="space-y-4">
@@ -128,15 +116,15 @@ export default function ConnectorsTab() {
         <p className="mr-auto max-w-2xl text-sm text-muted">
           MCP servers the Factory uses for operations, agents and watchers. Launch settings are tested live; secrets are masked once saved.
         </p>
-        <Button icon={Plus} onClick={() => setEditing('new')}>Add connector</Button>
+        <Button icon={Plus} onClick={() => setAdding('pick')}>Add connector</Button>
       </div>
 
       {connectors.length === 0 ? (
         <EmptyState
           icon={Plug}
           title="No connector yet"
-          description="Add your MCP servers (DOINg.AI, Jira, Teams/e-mail…) — or install the Sandbox demo from the Backup tab to try everything with bundled servers."
-          action={<Button icon={Plus} onClick={() => setEditing('new')}>Add connector</Button>}
+          description="Start with your DOINg.AI (its URL) and your Jira (mcp-atlassian with an API token) — templates fill in the launch settings for you."
+          action={<Button icon={Plus} onClick={() => setAdding('pick')}>Add connector</Button>}
         />
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
@@ -154,7 +142,6 @@ export default function ConnectorsTab() {
                       <h3 className="truncate text-sm font-bold text-zinc-900 dark:text-white">{c.name}</h3>
                       <Badge tone={kind.tone} size="xs">{kind.label}</Badge>
                       <Badge tone="zinc" size="xs" variant="outline">{TRANSPORT_LABEL[c.transport]}</Badge>
-                      {c.sandbox && <Badge tone="violet" size="xs" icon={FlaskConical} title="Bundled sandbox server with fictional data">Sandbox</Badge>}
                     </div>
                     {c.description && <p className="mt-1 line-clamp-2 text-xs text-muted">{c.description}</p>}
                     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -178,13 +165,14 @@ export default function ConnectorsTab() {
                   <Button size="xs" variant="ghost" icon={RefreshCw} busy={busy === `test:${c.id}`} onClick={() => void test(c)}>Test</Button>
                   <Button size="xs" variant="ghost" icon={Wrench} onClick={() => setBench(c)}>Tools</Button>
                   <Button size="xs" variant="ghost" icon={Pencil} onClick={() => setEditing(c)}>Edit</Button>
-                  {c.sandbox && c.kind === 'portfolio' && (
-                    <Tooltip content="Same server in bridge mode: reads your real DOINg.AI, read-only">
-                      <Button size="xs" variant="ghost" icon={Copy} busy={busy === `bridge:${c.id}`} onClick={() => void duplicateAsBridge(c)}>
-                        Duplicate as DOINg.AI bridge
+                  {hasStandardSetup(c) && (
+                    <Tooltip content="Creates the standard operations (and the intake watcher) for this system — safe to run twice">
+                      <Button size="xs" variant="ghost" icon={ListPlus} busy={busy === `std:${c.id}`} disabled={!c.enabled} onClick={() => void standardSetup(c)}>
+                        Create standard operations
                       </Button>
                     </Tooltip>
                   )}
+                  {c.kind === 'portfolio' && <ImportPeopleButton connector={c} size="xs" variant="ghost" />}
                   <IconButton icon={Trash2} label={`Delete ${c.name}`} size="xs" className="ml-auto" busy={busy === `del:${c.id}`} onClick={() => void remove(c)} />
                 </div>
               </Card>
@@ -193,6 +181,33 @@ export default function ConnectorsTab() {
         </div>
       )}
 
+      <AddConnector
+        state={adding}
+        templates={templates}
+        templatesError={templatesError}
+        onRetryTemplates={() => void reloadTemplates()}
+        onPick={setAdding}
+        onCustom={() => { setAdding(null); setEditing('new'); }}
+        onClose={() => setAdding(null)}
+        onOpenTools={(c) => { setAdding(null); setBench(c); }}
+        onSetup={(c) => { setAdding(null); void standardSetup(c); }}
+      />
+      <Modal
+        open={!!setupReport}
+        onClose={() => setSetupReport(null)}
+        title={setupReport ? `Standard operations · ${setupReport.connector.name}` : ''}
+        subtitle="Review or adapt them in Studio › Operations; the watcher is in Settings › Watchers."
+        icon={ListPlus}
+        footer={(
+          <>
+            <Button variant="ghost" onClick={() => navigate(paths.settings('watchers'))}>Watchers</Button>
+            <Button variant="outline" onClick={() => navigate(paths.operations())}>Open Operations</Button>
+            <Button onClick={() => setSetupReport(null)}>Done</Button>
+          </>
+        )}
+      >
+        {setupReport && <StandardSetupReport result={setupReport.result} />}
+      </Modal>
       <ConnectorEditor
         connector={editing}
         onClose={() => setEditing(null)}
@@ -203,6 +218,90 @@ export default function ConnectorsTab() {
       />
       <ToolBench connector={bench} onClose={() => setBench(null)} onTest={(c) => void test(c)} testing={!!bench && busy === `test:${bench.id}`} />
     </div>
+  );
+}
+
+// ---- Add: template picker, then the form generated from the template -----------------------------
+
+function AddConnector({ state, templates, templatesError, onRetryTemplates, onPick, onCustom, onClose, onOpenTools, onSetup }: {
+  state: 'pick' | ConnectorTemplate | null;
+  templates: ConnectorTemplate[] | null;
+  templatesError: string;
+  onRetryTemplates: () => void;
+  onPick: (t: ConnectorTemplate | 'pick') => void;
+  onCustom: () => void;
+  onClose: () => void;
+  onOpenTools: (c: Connector) => void;
+  onSetup: (c: Connector) => void;
+}) {
+  const [connected, setConnected] = useState<Connector | null>(null);
+  useEffect(() => setConnected(null), [state]);
+  if (state === null) return null;
+
+  if (state === 'pick') {
+    return (
+      <Modal open onClose={onClose} title="Add a connector" subtitle="Pick a template — or describe the MCP server yourself." icon={Plug} size="lg">
+        {!templates && <TemplatesLoading error={templatesError} onRetry={onRetryTemplates} />}
+        <div className={cls('grid gap-3 sm:grid-cols-2', !templates && 'mt-3')}>
+          {(templates ?? []).map((t) => {
+            const Icon = templateIcon(t);
+            const kind = KIND_META[t.kind] ?? KIND_META.other;
+            return (
+              <Card key={t.id} padding="md" onClick={() => onPick(t)} className="cursor-pointer transition-colors hover:border-brand-500/50">
+                <div className="flex items-center gap-2">
+                  <Icon size={18} className="text-brand-500" />
+                  <span className="text-sm font-bold text-zinc-900 dark:text-white">{t.name}</span>
+                  <Badge tone={kind.tone} size="xs" className="ml-auto">{kind.label}</Badge>
+                </div>
+                <p className="mt-1.5 text-xs text-muted">{t.description}</p>
+              </Card>
+            );
+          })}
+          <Card padding="md" onClick={onCustom} className="cursor-pointer transition-colors hover:border-brand-500/50">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal size={18} className="text-zinc-500" />
+              <span className="text-sm font-bold text-zinc-900 dark:text-white">Custom</span>
+            </div>
+            <p className="mt-1.5 text-xs text-muted">Any MCP server: command, arguments and environment (stdio), or a URL and headers (HTTP / SSE).</p>
+          </Card>
+        </div>
+      </Modal>
+    );
+  }
+
+  const t = state;
+  return (
+    <Drawer
+      open
+      onClose={onClose}
+      title={`Connect ${t.name}`}
+      subtitle={t.description}
+      icon={templateIcon(t)}
+      width="lg"
+      footer={
+        connected ? (
+          <>
+            <Button variant="ghost" onClick={() => onOpenTools(connected)}>Browse tools</Button>
+            {hasStandardSetup(connected) && <Button variant="outline" icon={ListPlus} onClick={() => onSetup(connected)}>Create standard operations</Button>}
+            <Button onClick={onClose}>Done</Button>
+          </>
+        ) : (
+          <>
+            <Button variant="ghost" onClick={() => onPick('pick')}>Other templates</Button>
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          </>
+        )
+      }
+    >
+      <div className="space-y-4 p-5">
+        <TemplateConnectForm template={t} onConnected={setConnected} />
+        {connected?.kind === 'portfolio' && (
+          <Note tone="sky" icon={CircleDot}>
+            Next: create the standard operations (new use cases → Intake), then import the people your DOINg.AI knows from the connector card.
+          </Note>
+        )}
+      </div>
+    </Drawer>
   );
 }
 
@@ -292,9 +391,6 @@ function ConnectorEditorBody({ connector, onClose, onSaved }: {
       }
     >
       <div className="space-y-5 p-5">
-        {connector?.sandbox && (
-          <Note tone="violet" icon={FlaskConical}>This is a bundled <b>Sandbox</b> server with fictional data.</Note>
-        )}
         <div className="grid gap-4 sm:grid-cols-[2fr_1fr]">
           <Field label="Name" required help="Also the tool namespace (slug) — renaming later keeps the original slug.">
             <Input value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Jira (production)" />
